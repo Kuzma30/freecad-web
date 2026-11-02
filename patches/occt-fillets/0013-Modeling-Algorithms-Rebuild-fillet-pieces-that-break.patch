@@ -1,0 +1,781 @@
+From 530e0aadde98ca846ff30b4ad5abafd278f42257 Mon Sep 17 00:00:00 2001
+From: Kuzma30 <kuzemkoa@gmail.com>
+Date: Mon, 26 Oct 2026 10:09:17 +0200
+Subject: [PATCH 13/24] Modeling Algorithms - Rebuild fillet pieces that break
+ the tangency of the trace
+
+On the FreeCAD screw of the previous commits, the fillet of the start wall
+next to the fillet of the root (both of radius 1) left a loop on the wall
+or failed: the walking keeps the center of the ball in the section plane,
+and near the root the surfdata after the one on the fillet of the root
+starts with a hook (radii 0.8-1), or, when the ball does not fit into the
+root (above 1), the walking makes a swallowtail there. At radius 1 and
+above the surfdata on the root is also twisted, and the filling crashed on
+a neighbor computed out of its face.
+
+PerformSetOfKGen now rebuilds such a surfdata with the filling it uses for
+a twisted one:
+- a surfdata is also rebuilt when the trace on one of its sides breaks the
+  tangency with the trace of a neighbor on the same face, or a neighbor
+  starts or ends with a sharp turn (more than 10 degrees between chords of
+  1/100 of its trace, on its first or last 40 percent), the other side
+  going on smoothly (one face or smooth edges) and the stripe not
+  periodic;
+- the bad end of such a neighbor (twisted or not) is left to the filling:
+  its trace starts (ends) after it;
+- when the neighbors turn the same way as the chord between them, the
+  rebuilt trace is a cubic tangent to them, with the tangents of a
+  circular arc turning by the same angle;
+- otherwise the ball does not fit: the trace before is cut where the trace
+  after, extended back straight, meets it (CornerOnPrevious), or at their
+  crossing, and the trace of the rebuilt surfdata on that face is the
+  straight segment from that corner, or nothing when both traces start
+  there (the filling ends in a point);
+- the compatibility at the corners of these fillings is checked, which
+  keeps their tangency to the faces and to the neighbors within 0.3
+  degree instead of 2 (up to 5 degrees next to the corner for radii
+  1.38-1.42, where the segment is very short);
+- the filling is oriented as the surfdata before it;
+- a twisted surfdata whose neighbor on the twisted side is computed out
+  of its face fails as one without neighbor instead of crashing.
+
+The fillet of the wall is valid for radii 0.08-1.82 (except 0.44-0.46 and
+0.525, where the walking fails as before), its trace tangent to the wall;
+the full chain of the file with FreeCAD's refine (with the next commit)
+stays valid with tolerance 2.4e-4.
+
+Draw tests bugs/modalg_8/fillet_wall_profile_over_root (radius 1),
+fillet_wall_profile_smooth_at_root (0.8), fillet_wall_profile_corner_at_root
+(1.2) and fillet_wall_profile_corner_sharp_end (1.6).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
+---
+ .../TKFillet/ChFi3d/ChFi3d_Builder_2.cxx      | 540 +++++++++++++++++-
+ .../fillet_wall_profile_corner_at_root        |  19 +
+ .../fillet_wall_profile_corner_sharp_end      |  18 +
+ .../modalg_8/fillet_wall_profile_over_root    |  21 +
+ .../fillet_wall_profile_smooth_at_root        |  19 +
+ 5 files changed, 612 insertions(+), 5 deletions(-)
+ create mode 100644 tests/bugs/modalg_8/fillet_wall_profile_corner_at_root
+ create mode 100644 tests/bugs/modalg_8/fillet_wall_profile_corner_sharp_end
+ create mode 100644 tests/bugs/modalg_8/fillet_wall_profile_over_root
+ create mode 100644 tests/bugs/modalg_8/fillet_wall_profile_smooth_at_root
+
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
+index a97ca3f01..d0ffc5aa7 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
+@@ -45,6 +45,7 @@
+ #include <Extrema_ExtPS.hxx>
+ #include <Extrema_LocateExtPC.hxx>
+ #include <Extrema_POnCurv.hxx>
++#include <Geom2d_BezierCurve.hxx>
+ #include <Geom2d_Curve.hxx>
+ #include <Geom_BSplineSurface.hxx>
+ #include <Geom_Plane.hxx>
+@@ -3624,6 +3625,305 @@ static double ChFi3d_BoxDiag(const Bnd_Box& box)
+ 
+ //=================================================================================================
+ 
++static occ::handle<Geom2d_Curve> SmoothPCurve(const occ::handle<Adaptor3d_Surface>& theSurf,
++                                              const gp_Pnt2d&                       thePnt1,
++                                              const gp_Vec2d&                       theTan1,
++                                              const gp_Pnt2d&                       thePnt2,
++                                              const gp_Vec2d&                       theTan2)
++{
++  // A cubic from thePnt1 to thePnt2 on the surface, tangent there to
++  // theTan1 and theTan2 (both along the curve), with the tangents
++  // of a circular arc turning by the angle between them.
++  // In parameters scaled to the lengths on the surface.
++  const double aUR = theSurf->UResolution(1.), aVR = theSurf->VResolution(1.);
++  const gp_XY  aP1(thePnt1.X() / aUR, thePnt1.Y() / aVR), aP2(thePnt2.X() / aUR, thePnt2.Y() / aVR);
++  gp_XY        aT1(theTan1.X() / aUR, theTan1.Y() / aVR), aT2(theTan2.X() / aUR, theTan2.Y() / aVR);
++  const double aChord = (aP2 - aP1).Modulus();
++  if (aT1.Modulus() > gp::Resolution())
++  {
++    aT1.Normalize();
++  }
++  if (aT2.Modulus() > gp::Resolution())
++  {
++    aT2.Normalize();
++  }
++  // The length of the tangents of a circular arc turning by the same angle.
++  const double aTurn = std::max(std::acos(std::max(-1., std::min(1., aT1 * aT2))), 1.e-3);
++  const double aLen  = aChord * 2. / 3. * std::tan(aTurn / 4.) / std::sin(aTurn / 2.);
++  NCollection_Array1<gp_Pnt2d> aPoles(1, 4);
++  aPoles(1) = gp_Pnt2d(aP1);
++  aPoles(2) = gp_Pnt2d(aP1 + aT1 * aLen);
++  aPoles(3) = gp_Pnt2d(aP2 - aT2 * aLen);
++  aPoles(4) = gp_Pnt2d(aP2);
++  for (int i = 1; i <= 4; ++i)
++  {
++    aPoles(i).SetCoord(aPoles(i).X() * aUR, aPoles(i).Y() * aVR);
++  }
++  return new Geom2d_BezierCurve(aPoles);
++}
++
++//=================================================================================================
++
++static double TraceKink(const TopOpeBRepDS_DataStructure&   theDS,
++                        const occ::handle<ChFiDS_SurfData>& theA,
++                        const occ::handle<ChFiDS_SurfData>& theB,
++                        const int                           theSide,
++                        const bool                          theOnOneFace = true)
++{
++  // The angle between the traces on side theSide of theA and theB
++  // (theB following theA) at the section between them. If they
++  // cannot be compared: 0 when they must be on one face
++  // (theOnOneFace), pi otherwise.
++  const double aNone = theOnOneFace ? 0. : M_PI;
++  if (theA.IsNull() || theB.IsNull()
++      || (theOnOneFace
++          && (theA->Index(theSide) <= 0 || theA->Index(theSide) != theB->Index(theSide))))
++  {
++    return aNone;
++  }
++  const ChFiDS_FaceInterference& aFa = theA->Interference(theSide);
++  const ChFiDS_FaceInterference& aFb = theB->Interference(theSide);
++  if (aFa.LineIndex() == 0 || aFb.LineIndex() == 0)
++  {
++    return aNone;
++  }
++  const occ::handle<Geom_Curve>& aCa = theDS.Curve(aFa.LineIndex()).Curve();
++  const occ::handle<Geom_Curve>& aCb = theDS.Curve(aFb.LineIndex()).Curve();
++  if (aCa.IsNull() || aCb.IsNull())
++  {
++    return aNone;
++  }
++  gp_Pnt aPa, aPb;
++  gp_Vec aTa, aTb;
++  aCa->D1(aFa.LastParameter(), aPa, aTa);
++  aCb->D1(aFb.FirstParameter(), aPb, aTb);
++  if (aTa.Magnitude() < gp::Resolution() || aTb.Magnitude() < gp::Resolution()
++      || aPa.Distance(aPb) > 1.e-3)
++  {
++    return aNone;
++  }
++  return aTa.Angle(aTb);
++}
++
++//=================================================================================================
++
++static bool IsSmoothTransition(const TopOpeBRepDS_DataStructure&   theDS,
++                               const occ::handle<ChFiDS_SurfData>& theA,
++                               const occ::handle<ChFiDS_SurfData>& theB,
++                               const int                           theSide)
++{
++  // The side theSide of theA goes on to theB (following it) on the
++  // same face, or across a smooth edge of the shape.
++  if (theA.IsNull() || theB.IsNull() || theA->Index(theSide) <= 0 || theB->Index(theSide) <= 0)
++  {
++    return false;
++  }
++  if (theA->Index(theSide) == theB->Index(theSide))
++  {
++    return true;
++  }
++  const ChFiDS_CommonPoint& aCP = theA->Vertex(false, theSide);
++  if (!aCP.IsOnArc())
++  {
++    return false;
++  }
++  const TopoDS_Face aFa = TopoDS::Face(theDS.Shape(theA->Index(theSide)));
++  const TopoDS_Face aFb = TopoDS::Face(theDS.Shape(theB->Index(theSide)));
++  return BRep_Tool::HasContinuity(aCP.Arc(), aFa, aFb)
++         && BRep_Tool::Continuity(aCP.Arc(), aFa, aFb) >= GeomAbs_G1;
++}
++
++//=================================================================================================
++
++static void OrientAsPrevious(const TopOpeBRepDS_DataStructure&   theDS,
++                             const occ::handle<ChFiDS_SurfData>& thePrev,
++                             const occ::handle<ChFiDS_SurfData>& theCur,
++                             const int                           theSide)
++{
++  // The orientation of theCur follows the one of thePrev, by their
++  // normals at the section between them, on the side theSide.
++  if (thePrev.IsNull())
++  {
++    return;
++  }
++  const occ::handle<Geom2d_Curve>& aP1 = theCur->Interference(theSide).PCurveOnSurf();
++  const occ::handle<Geom2d_Curve>& aP2 = thePrev->Interference(theSide).PCurveOnSurf();
++  if (aP1.IsNull() || aP2.IsNull())
++  {
++    return;
++  }
++  ChFi3d_OrientAsNeighbour(theDS.Surface(theCur->Surf()).Surface(),
++                           aP1->Value(theCur->Interference(theSide).FirstParameter()),
++                           theDS.Surface(thePrev->Surf()).Surface(),
++                           aP2->Value(thePrev->Interference(theSide).LastParameter()),
++                           thePrev->Orientation(),
++                           theCur->ChangeOrientation());
++}
++
++//=================================================================================================
++
++static bool UntwistedEnd(const occ::handle<ChFiDS_SurfData>& theSD,
++                         const int                           theSide,
++                         const occ::handle<Geom_Curve>&      theTrace,
++                         const bool                          theFromStart,
++                         double&                             theW)
++{
++  // The parameter on the trace on side theSide of theSD from which
++  // (theFromStart) or up to which the trace goes on smoothly: near
++  // that end, and only there, it turns sharply (more than 10 degrees
++  // between chords of 1/100 of it; a hook, or a cusp where the
++  // walking came back).
++  // False if the trace goes on smoothly up to that end, or if it
++  // does not further than its first (last) 40 percent.
++  if (theTrace.IsNull())
++  {
++    return false;
++  }
++  const ChFiDS_FaceInterference& aFi = theSD->Interference(theSide);
++  const double                   aF = aFi.FirstParameter(), aL = aFi.LastParameter();
++  if (aL - aF < Precision::PConfusion())
++  {
++    return false;
++  }
++  const int    aNb      = 100;
++  const int    aZone    = 2 * aNb / 5;
++  const double aSharp   = 10. * M_PI / 180.;
++  int          aBadLast = -1, aBadFirst = aNb + 1;
++  gp_Pnt       aPrev = theTrace->Value(aF);
++  gp_Vec       aPrevD;
++  for (int k = 1; k <= aNb; ++k)
++  {
++    const gp_Pnt aP = theTrace->Value(aF + (aL - aF) * k / aNb);
++    const gp_Vec aD(aPrev, aP);
++    aPrev = aP;
++    if (aD.Magnitude() < Precision::Confusion())
++    {
++      continue;
++    }
++    const bool isBad = aPrevD.Magnitude() > Precision::Confusion() && aPrevD.Angle(aD) > aSharp;
++    aPrevD           = aD;
++    if (isBad)
++    {
++      aBadLast  = k;
++      aBadFirst = std::min(aBadFirst, k);
++    }
++  }
++  if (aBadLast < 0)
++  {
++    return false;
++  }
++  if (theFromStart ? aBadLast > aZone : aBadFirst < aNb - aZone)
++  {
++    return false;
++  }
++  // A few steps beyond the last chord going wrong.
++  const int aK = theFromStart ? aBadLast + 2 : aBadFirst - 3;
++  theW         = aF + (aL - aF) * aK / aNb;
++  return true;
++}
++
++//=================================================================================================
++
++static bool CornerOnPrevious(const occ::handle<ChFiDS_SurfData>& thePrev,
++                             const occ::handle<ChFiDS_SurfData>& theNext,
++                             const int                           theSide,
++                             const double                        theWNext,
++                             double&                             theW,
++                             double&                             theWNextOut)
++{
++  // The parameter theW on the trace on side theSide of thePrev
++  // (in its second half) where the trace of theNext, extended back
++  // straight from the parameter theWNext in the parameters of the
++  // face, meets it; theWNextOut, the parameter on the trace of
++  // theNext where it starts then (at the crossing, if the trace
++  // after already crosses the one before).
++  const ChFiDS_FaceInterference&   aFp = thePrev->Interference(theSide);
++  const occ::handle<Geom2d_Curve>& aCp = aFp.PCurveOnFace();
++  const occ::handle<Geom2d_Curve>& aCn = theNext->Interference(theSide).PCurveOnFace();
++  if (aCp.IsNull() || aCn.IsNull())
++  {
++    return false;
++  }
++  theWNextOut = theWNext;
++  gp_Pnt2d aP2;
++  gp_Vec2d aT2;
++  aCn->D1(theWNext, aP2, aT2);
++  if (aT2.Magnitude() < gp::Resolution())
++  {
++    return false;
++  }
++  aT2.Normalize();
++  // The signed distance to the line of the trace after, behind its start.
++  const auto aSide2 = [&](const double theW) {
++    return aT2.Crossed(gp_Vec2d(aP2, aCp->Value(theW)));
++  };
++  const double aF = aFp.FirstParameter(), aL = aFp.LastParameter();
++  const int    aNb = 100;
++  double       aW1 = aL, aD1 = aSide2(aL);
++  for (int k = aNb - 1; k >= aNb / 2; --k)
++  {
++    const double aW0 = aF + (aL - aF) * k / aNb;
++    const double aD0 = aSide2(aW0);
++    if ((aD0 <= 0.) != (aD1 <= 0.))
++    {
++      // Bisection.
++      double aA = aW0, aB = aW1, aDA = aD0;
++      for (int i = 0; i < 50; ++i)
++      {
++        const double aM  = 0.5 * (aA + aB);
++        const double aDM = aSide2(aM);
++        if ((aDM <= 0.) == (aDA <= 0.))
++        {
++          aA  = aM;
++          aDA = aDM;
++        }
++        else
++        {
++          aB = aM;
++        }
++      }
++      theW = 0.5 * (aA + aB);
++      // Behind the start of the trace after (or at it), and not at the end
++      // of the trace before (that is no corner).
++      const double   aScale = aCp->Value(aF).Distance(aCp->Value(aL));
++      const gp_Pnt2d aX     = aCp->Value(theW);
++      if (aL - theW < 1.e-3 * (aL - aF))
++      {
++        return false;
++      }
++      if (gp_Vec2d(aP2, aX).Dot(aT2) < 1.e-3 * aScale)
++      {
++        return true;
++      }
++      // Ahead of the start of the trace after: the trace after crosses the
++      // one before there, it starts at the crossing.
++      const ChFiDS_FaceInterference& aFn   = theNext->Interference(theSide);
++      double                         aBest = RealLast(), aWBest = theWNext;
++      for (int j = 0; j <= 200; ++j)
++      {
++        const double aWj = theWNext + (aFn.LastParameter() - theWNext) * j / 200.;
++        const double aDj = aCn->Value(aWj).Distance(aX);
++        if (aDj < aBest)
++        {
++          aBest  = aDj;
++          aWBest = aWj;
++        }
++      }
++      if (aBest > 1.e-2 * aScale || aWBest - theWNext > 0.5 * (aFn.LastParameter() - theWNext))
++      {
++        return false;
++      }
++      theWNextOut = aWBest;
++      return true;
++    }
++    aW1 = aW0;
++    aD1 = aD0;
++  }
++  return false;
++}
++
++//=================================================================================================
++
+ void ChFi3d_Builder::PerformSetOfKGen(occ::handle<ChFiDS_Stripe>& Stripe, const bool Simul)
+ {
+   occ::handle<BRepTopAdaptor_TopolTool>                   It1   = new BRepTopAdaptor_TopolTool();
+@@ -3676,6 +3976,61 @@ void ChFi3d_Builder::PerformSetOfKGen(occ::handle<ChFiDS_Stripe>& Stripe, const
+         }
+       }
+ 
++      // The trace rebuilt on a side follows the tangents of the neighbors
++      // with a smooth curve when the walking went wrong next to them.
++      bool isSmooth1 = false, isSmooth2 = false;
++      // The trace rebuilt on a side is a straight segment from the corner
++      // where the trace before meets the one after, extended back.
++      bool isCorner1 = false, isCorner2 = false;
++      // A surfdata whose trace on a face breaks the tangency with the trace
++      // of a neighbor on the same face is rebuilt as a twisted one: the
++      // walking went wrong there (a ball which barely fits into a fillet of
++      // a close radius, its center kept in the section plane).
++      if (!tw1 && !tw2 && !Simul && !periodic)
++      {
++        const occ::handle<ChFiDS_SurfData> aPv      = iprev ? SeqSurf.Value(iprev) : nullptr;
++        const occ::handle<ChFiDS_SurfData> aNx      = inext ? SeqSurf.Value(inext) : nullptr;
++        const double                       aKinkMax = 0.1;
++        for (int aSide = 1; aSide <= 2; ++aSide)
++        {
++          double     aW = 0.;
++          const bool isKink =
++            TraceKink(DStr, aPv, cursd, aSide) > aKinkMax
++            || TraceKink(DStr, cursd, aNx, aSide) > aKinkMax
++            || (!aNx.IsNull() && aNx->Interference(aSide).LineIndex() > 0
++                && UntwistedEnd(aNx,
++                                aSide,
++                                DStr.Curve(aNx->Interference(aSide).LineIndex()).Curve(),
++                                true,
++                                aW))
++            || (!aPv.IsNull() && aPv->Interference(aSide).LineIndex() > 0
++                && UntwistedEnd(aPv,
++                                aSide,
++                                DStr.Curve(aPv->Interference(aSide).LineIndex()).Curve(),
++                                false,
++                                aW));
++          // Only between two neighbors on that face, the other side going on
++          // on one face or across smooth edges: with a sharp edge there, the
++          // kink is real.
++          if (isKink && !aPv.IsNull() && !aNx.IsNull() && cursd->IndexOfS1() > 0
++              && cursd->IndexOfS2() > 0 && aPv->Index(aSide) == cursd->Index(aSide)
++              && aNx->Index(aSide) == cursd->Index(aSide)
++              && IsSmoothTransition(DStr, aPv, cursd, 3 - aSide)
++              && IsSmoothTransition(DStr, cursd, aNx, 3 - aSide))
++          {
++            if (aSide == 1)
++            {
++              tw1       = true;
++              isSmooth1 = true;
++            }
++            else
++            {
++              tw2       = true;
++              isSmooth2 = true;
++            }
++          }
++        }
++      }
+       // For the moment only the surfaces where the twist is
+       // detected at the path are corrected, it is necessary to control
+       // more subtly the ugly traces (size, curvature, inflexion... )
+@@ -3735,6 +4090,141 @@ void ChFi3d_Builder::PerformSetOfKGen(occ::handle<ChFiDS_Stripe>& Stripe, const
+           samesurfon2 = (nextsd->IndexOfS2() == cursurf2);
+         }
+       }
++      // A neighbor on the same face may go wrong only at its end next to
++      // the surfdata (the walking came back on the trace there): that end of
++      // its trace is left to the filling, the rest is a neighbor. The trace
++      // is then rebuilt smoothly between the neighbors, if they turn the
++      // same way as the chord between them (otherwise their traces would
++      // rather cross: the ball does not fit at all).
++      for (int aSide = 1; aSide <= 2; ++aSide)
++      {
++        bool&      isTw  = aSide == 1 ? tw1 : tw2;
++        const int  aCur  = aSide == 1 ? cursurf1 : cursurf2;
++        bool&      isNx  = aSide == 1 ? yanexton1 : yanexton2;
++        bool&      isPv  = aSide == 1 ? yaprevon1 : yaprevon2;
++        bool&      isSm  = aSide == 1 ? isSmooth1 : isSmooth2;
++        const bool wasTw = aSide == 1 ? cursd->TwistOnS1() : cursd->TwistOnS2();
++        if (!isTw || aCur <= 0)
++        {
++          continue;
++        }
++        double aWn = 0., aWp = 0.;
++        bool   isNxBad = inext && nextsd->Index(aSide) == aCur
++                       && nextsd->Interference(aSide).LineIndex() > 0
++                       && UntwistedEnd(nextsd,
++                                       aSide,
++                                       DStr.Curve(nextsd->Interference(aSide).LineIndex()).Curve(),
++                                       true,
++                                       aWn);
++        bool isPvBad = iprev && prevsd->Index(aSide) == aCur
++                       && prevsd->Interference(aSide).LineIndex() > 0
++                       && UntwistedEnd(prevsd,
++                                       aSide,
++                                       DStr.Curve(prevsd->Interference(aSide).LineIndex()).Curve(),
++                                       false,
++                                       aWp);
++        bool isConvex = false;
++        if ((isNxBad || isPvBad || isSm) && inext && iprev && nextsd->Index(aSide) == aCur
++            && prevsd->Index(aSide) == aCur && nextsd->Interference(aSide).LineIndex() > 0
++            && prevsd->Interference(aSide).LineIndex() > 0
++            && !DStr.Curve(prevsd->Interference(aSide).LineIndex()).Curve().IsNull()
++            && !DStr.Curve(nextsd->Interference(aSide).LineIndex()).Curve().IsNull())
++        {
++          gp_Pnt aP1, aP2;
++          gp_Vec aT1, aT2;
++          DStr.Curve(prevsd->Interference(aSide).LineIndex())
++            .Curve()
++            ->D1(isPvBad ? aWp : prevsd->Interference(aSide).LastParameter(), aP1, aT1);
++          DStr.Curve(nextsd->Interference(aSide).LineIndex())
++            .Curve()
++            ->D1(isNxBad ? aWn : nextsd->Interference(aSide).FirstParameter(), aP2, aT2);
++          const gp_Vec aC(aP1, aP2);
++          const gp_Vec aTurn = aT1.Crossed(aT2);
++          if (aTurn.Magnitude() < 1.e-3 * aT1.Magnitude() * aT2.Magnitude())
++          {
++            isConvex = aC.Dot(aT1) > 0. && aC.Dot(aT2) > 0.;
++          }
++          else
++          {
++            isConvex = aT1.Crossed(aC).Dot(aTurn) > 0. && aC.Crossed(aT2).Dot(aTurn) > 0.;
++          }
++        }
++        bool&  isCo      = aSide == 1 ? isCorner1 : isCorner2;
++        double aWnCorner = 0.;
++        if (!isConvex && wasTw && inext && iprev && nextsd->Index(aSide) == aCur
++            && prevsd->Index(aSide) == aCur
++            && CornerOnPrevious(prevsd,
++                                nextsd,
++                                aSide,
++                                isNxBad ? aWn : nextsd->Interference(aSide).FirstParameter(),
++                                aWp,
++                                aWnCorner))
++        {
++          if (aWnCorner > (isNxBad ? aWn : nextsd->Interference(aSide).FirstParameter()))
++          {
++            aWn     = aWnCorner;
++            isNxBad = true;
++          }
++          // The ball does not fit: the trace before is cut where the one
++          // after, extended back, meets it. The surfdata after, twisted only
++          // by the walking coming back, is a neighbor.
++          isCo    = true;
++          isPvBad = true;
++          if (!isNxBad)
++          {
++            if (aSide == 1)
++            {
++              nextsd->TwistOnS1(false);
++            }
++            else
++            {
++              nextsd->TwistOnS2(false);
++            }
++            isNx = true;
++          }
++        }
++        else if (!isConvex)
++        {
++          // The rebuild asked for a kink only is given up.
++          if (!wasTw)
++          {
++            isTw = false;
++          }
++          isSm = false;
++          continue;
++        }
++        isSm = !isCo;
++        if (isNxBad)
++        {
++          nextsd->ChangeInterference(aSide).SetFirstParameter(aWn);
++          if (aSide == 1)
++          {
++            nextsd->TwistOnS1(false);
++          }
++          else
++          {
++            nextsd->TwistOnS2(false);
++          }
++          isNx = true;
++        }
++        if (isPvBad)
++        {
++          prevsd->ChangeInterference(aSide).SetLastParameter(aWp);
++          if (aSide == 1)
++          {
++            prevsd->TwistOnS1(false);
++          }
++          else
++          {
++            prevsd->TwistOnS2(false);
++          }
++          isPv = true;
++        }
++      }
++      if (!tw1 && !tw2)
++      {
++        continue;
++      }
+       // A contour of filling is constructed
+       occ::handle<Geom2d_Curve>        PC1 = intf1.PCurveOnFace();
+       occ::handle<Geom2d_Curve>        PC2 = intf2.PCurveOnFace();
+@@ -3746,6 +4236,17 @@ void ChFi3d_Builder::PerformSetOfKGen(occ::handle<ChFiDS_Stripe>& Stripe, const
+       S2->Initialize(F2);
+       occ::handle<GeomFill_Boundary> Bdeb, Bfin, Bon1, Bon2;
+       bool                           pointuon1 = false, pointuon2 = false;
++      // A neighbor computed out of its face on the twisted side has no face
++      // to rebuild the trace on.
++      if ((tw1
++           && (!yaprevon1 || !yanexton1 || prevsd->IndexOfS1() <= 0 || nextsd->IndexOfS1() <= 0))
++          || (tw2
++              && (!yaprevon2 || !yanexton2 || prevsd->IndexOfS2() <= 0
++                  || nextsd->IndexOfS2() <= 0)))
++      {
++        Spine->SetErrorStatus(ChFiDS_TwistedSurface);
++        throw Standard_Failure("adjustment by reprocessing the non-written points: no neighbor");
++      }
+       if (tw1)
+       {
+         if (!yaprevon1 || !yanexton1)
+@@ -3794,7 +4295,19 @@ void ChFi3d_Builder::PerformSetOfKGen(occ::handle<ChFiDS_Stripe>& Stripe, const
+             gp_Vec2d vdeb1, vfin1;
+             pcprev1->D1(prevpar1, pdeb1, vdeb1);
+             pcnext1->D1(nextpar1, pfin1, vfin1);
+-            Bon1 = ChFi3d_mkbound(S1, PC1, -1, pdeb1, vdeb1, 1, pfin1, vfin1, tolapp3d, 2.e-4);
++            if (isCorner1)
++            {
++              Bon1 = ChFi3d_mkbound(S1, PC1, pdeb1, pfin1, tolapp3d, 2.e-4, false);
++            }
++            else if (isSmooth1)
++            {
++              PC1  = SmoothPCurve(S1, pdeb1, vdeb1, pfin1, vfin1);
++              Bon1 = ChFi3d_mkbound(S1, PC1, tolapp3d, 2.e-4);
++            }
++            else
++            {
++              Bon1 = ChFi3d_mkbound(S1, PC1, -1, pdeb1, vdeb1, 1, pfin1, vfin1, tolapp3d, 2.e-4);
++            }
+           }
+         }
+         else
+@@ -3865,7 +4378,19 @@ void ChFi3d_Builder::PerformSetOfKGen(occ::handle<ChFiDS_Stripe>& Stripe, const
+             gp_Vec2d vdeb2, vfin2;
+             pcprev2->D1(prevpar2, pdeb2, vdeb2);
+             pcnext2->D1(nextpar2, pfin2, vfin2);
+-            Bon2 = ChFi3d_mkbound(S2, PC2, -1, pdeb2, vdeb2, 1, pfin2, vfin2, tolapp3d, 2.e-4);
++            if (isCorner2)
++            {
++              Bon2 = ChFi3d_mkbound(S2, PC2, pdeb2, pfin2, tolapp3d, 2.e-4, false);
++            }
++            else if (isSmooth2)
++            {
++              PC2  = SmoothPCurve(S2, pdeb2, vdeb2, pfin2, vfin2);
++              Bon2 = ChFi3d_mkbound(S2, PC2, tolapp3d, 2.e-4);
++            }
++            else
++            {
++              Bon2 = ChFi3d_mkbound(S2, PC2, -1, pdeb2, vdeb2, 1, pfin2, vfin2, tolapp3d, 2.e-4);
++            }
+           }
+         }
+         else
+@@ -3915,15 +4440,18 @@ void ChFi3d_Builder::PerformSetOfKGen(occ::handle<ChFiDS_Stripe>& Stripe, const
+       GeomFill_ConstrainedFilling fil(11, 20);
+       if (pointuon1)
+       {
+-        fil.Init(Bon2, Bfin, Bdeb, true);
++        fil.Init(Bon2, Bfin, Bdeb, !isCorner1);
+       }
+       else if (pointuon2)
+       {
+-        fil.Init(Bon1, Bfin, Bdeb, true);
++        fil.Init(Bon1, Bfin, Bdeb, !isCorner2);
+       }
+       else
+       {
+-        fil.Init(Bon1, Bfin, Bon2, Bdeb, true);
++        // The compatibility conditions at the corners are checked (and the
++        // tangency fields corrected) for a trace rebuilt smoothly: the
++        // tangency to the faces is kept within 0.1 degree instead of 2.
++        fil.Init(Bon1, Bfin, Bon2, Bdeb, !(isSmooth1 || isSmooth2 || isCorner1 || isCorner2));
+       }
+ 
+       ChFi3d_ReparamPcurv(0., 1., PC1);
+@@ -3965,6 +4493,8 @@ void ChFi3d_Builder::PerformSetOfKGen(occ::handle<ChFiDS_Stripe>& Stripe, const
+           cursd->ChangeIndexOfS2(0);
+         }
+       }
++      // The filling is oriented as the surfdata before it.
++      OrientAsPrevious(DStr, prevsd, cursd, tw1 ? 2 : 1);
+       if (tw1)
+       {
+         prevsd->ChangeVertexLastOnS1().SetPoint(cpd1.Point());
+diff --git a/tests/bugs/modalg_8/fillet_wall_profile_corner_at_root b/tests/bugs/modalg_8/fillet_wall_profile_corner_at_root
+new file mode 100644
+index 000000000..e4c05570f
+--- /dev/null
++++ b/tests/bugs/modalg_8/fillet_wall_profile_corner_at_root
+@@ -0,0 +1,19 @@
++puts "============"
++puts "Modeling Algorithms - Fillet of the start wall of a thread too large for its root"
++puts "(FreeCAD screw: edges of the start wall, radius 1.2, fillet of the root 1)"
++puts "============"
++puts ""
++
++# The ball does not fit into the fillet of the root: the walking makes a
++# swallowtail on the wall there. The trace on the wall of the surfdata before
++# is cut where the trace of the surfdata after, extended back, meets it; the
++# twisted surfdata between is rebuilt by a filling whose side on the wall is
++# the straight segment from that corner, tangent to the faces around it.
++restore [locate_data_file freecad_screw_wall_profile.brep] b
++explode b E
++
++blend result b 1.2 b_95
++
++checkshape result
++checkmaxtol result -ref 2.44e-4
++checkprops result -v 8708.12 -s 3016.4
+diff --git a/tests/bugs/modalg_8/fillet_wall_profile_corner_sharp_end b/tests/bugs/modalg_8/fillet_wall_profile_corner_sharp_end
+new file mode 100644
+index 000000000..17952cb02
+--- /dev/null
++++ b/tests/bugs/modalg_8/fillet_wall_profile_corner_sharp_end
+@@ -0,0 +1,18 @@
++puts "============"
++puts "Modeling Algorithms - Fillet of the start wall of a thread far too large for its root"
++puts "(FreeCAD screw: edges of the start wall, radius 1.6, fillet of the root 1)"
++puts "============"
++puts ""
++
++# As in fillet_wall_profile_corner_at_root, but the trace on the wall of the
++# surfdata after the one on the fillet of the root already crosses the trace
++# before: both are cut at the crossing, and the filling between them ends
++# in a point there.
++restore [locate_data_file freecad_screw_wall_profile.brep] b
++explode b E
++
++blend result b 1.6 b_95
++
++checkshape result
++checkmaxtol result -ref 1.83e-4
++checkprops result -v 8709.52 -s 3015.63
+diff --git a/tests/bugs/modalg_8/fillet_wall_profile_over_root b/tests/bugs/modalg_8/fillet_wall_profile_over_root
+new file mode 100644
+index 000000000..9cdf863c0
+--- /dev/null
++++ b/tests/bugs/modalg_8/fillet_wall_profile_over_root
+@@ -0,0 +1,21 @@
++puts "============"
++puts "Modeling Algorithms - Fillet of the start wall of a thread over the fillet of its root"
++puts "(FreeCAD screw: edges of the start wall, radius 1 as the fillet of the root)"
++puts "============"
++puts ""
++
++# The fillet runs along the whole profile of the groove on its start wall.
++# A ball of the radius of the fillet of the root barely fits into it: the
++# walking goes back and forth on the wall there, the surfdata on the fillet
++# of the root is twisted and the next one starts with a hook. The hook is
++# left to the filling that rebuilds the twisted surfdata, its trace on the
++# wall following the neighbors smoothly. Both ends are closed as in
++# fillet_wall_profile_cusp_ends.
++restore [locate_data_file freecad_screw_wall_profile.brep] b
++explode b E
++
++blend result b 1 b_95
++
++checkshape result
++checkmaxtol result -ref 1.83e-4
++checkprops result -v 8707.45 -s 3016.81
+diff --git a/tests/bugs/modalg_8/fillet_wall_profile_smooth_at_root b/tests/bugs/modalg_8/fillet_wall_profile_smooth_at_root
+new file mode 100644
+index 000000000..50330b531
+--- /dev/null
++++ b/tests/bugs/modalg_8/fillet_wall_profile_smooth_at_root
+@@ -0,0 +1,19 @@
++puts "============"
++puts "Modeling Algorithms - Fillet of the start wall of a thread kept tangent at its root"
++puts "(FreeCAD screw: edges of the start wall, radius 0.8)"
++puts "============"
++puts ""
++
++# Near the fillet of the root (radius 1) the walking keeps the center of the
++# ball in the section plane and the surfdata after the one on the fillet of
++# the root starts with a hook on the wall, a sharp bend where the tangency
++# was lost. That start is left to a filling which replaces the surfdata on
++# the fillet of the root, tangent to its neighbors and to both faces.
++restore [locate_data_file freecad_screw_wall_profile.brep] b
++explode b E
++
++blend result b 0.8 b_95
++
++checkshape result
++checkmaxtol result -ref 1.83e-4
++checkprops result -v 8707.03 -s 3017.3
+-- 
+2.43.0
+

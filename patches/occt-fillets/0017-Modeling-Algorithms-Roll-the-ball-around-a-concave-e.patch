@@ -1,0 +1,890 @@
+From 831677c11af382aaa051f1843ceccba471e4e3f8 Mon Sep 17 00:00:00 2001
+From: Kuzma30 <kuzemkoa@gmail.com>
+Date: Tue, 27 Oct 2026 14:46:28 +0200
+Subject: [PATCH 17/24] Modeling Algorithms - Roll the ball around a concave
+ edge at a fillet corner
+
+FreeCAD issue 20085: a cube with fillets of radius 6 on all edges and a
+square hole of 8 x 8 through it. The walls of the hole go along the
+tangent lines of the fillets of the cube, so the edges of the hole are
+lines on the cylinders of those fillets. Filleting them froze FreeCAD
+(OCCT 7.8) or gave a corner turned inside out at one corner of each end
+of the hole.
+
+At a corner of the hole two fillets of the same radius have no common
+support face: they end on one point of the vertical edge of the hole,
+while their other supports end on the sphere of the corner of the cube,
+centered on that edge. The ball rolls around the edge there, so the
+corner is a part of a torus whose axis is the edge and whose major and
+minor radii are the radius of the fillet, tangent to the sphere.
+ChFi3d_Builder::PerformTwoCornerOnRevolution builds it when the face of
+revolution is a sphere centered on the edge or a plane normal to it.
+
+Fixes found on the way:
+- ChFi3d_StripeEdgeInter matched the side 0 of a corner piece (a side
+  shrinking to a point, no face) as a common face and reported fillets
+  with too big radii.
+- ChFi3d_IsInFront asked the parameters of the vertex on a common face
+  of surfdatas further from the corner, which does not contain it: it
+  takes the projection of the vertex then.
+- ChFi3d_FilBuilder::PerformTwoCorner dereferenced a null pivot when the
+  two fillets end on different edges: it reports a failure now.
+- ChFi3d_Builder::PerformCapOnEndFace counts only the crossings of the
+  cap curve inside the parametric box of the fillet, not those with far
+  parts of an analytic fillet surface.
+
+All 8 edges of the hole filleted with r = 0.5 to 2.9 give valid shapes
+with tolerance 1e-4 (r = 2: 129.34 mm3 removed). The r = 3 limit is
+geometric: the fillet does not fit between the wall and the cylinder of
+radius 6.
+
+New DRAW test bugs/modalg_8/fillet_rounded_cube_square_hole (new data
+file freecad20085_rounded_cube_pocket.brep) and GTest
+BRepFilletAPI_MakeFilletTest.SquareHoleInRoundedCube_RollsBallAroundHoleEdges.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
+---
+ .../TKFillet/ChFi3d/ChFi3d_Builder.cxx        |   4 +
+ .../TKFillet/ChFi3d/ChFi3d_Builder.hxx        |  10 +
+ .../TKFillet/ChFi3d/ChFi3d_Builder_0.cxx      |  42 +-
+ .../TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx     |  30 +-
+ .../TKFillet/ChFi3d/ChFi3d_Builder_C2.cxx     | 484 ++++++++++++++++++
+ .../TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx  |   7 +
+ .../GTests/BRepFilletAPI_MakeFillet_Test.cxx  |  75 +++
+ .../modalg_8/fillet_rounded_cube_square_hole  |  31 ++
+ 8 files changed, 673 insertions(+), 10 deletions(-)
+ create mode 100644 tests/bugs/modalg_8/fillet_rounded_cube_square_hole
+
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
+index 8815a650c..7b1f3ebfc 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
+@@ -911,6 +911,10 @@ void ChFi3d_Builder::PerformFilletOnVertex(const int Index)
+       }
+       break;
+       case 2: {
++        if (PerformTwoCornerOnRevolution(Index))
++        {
++          break;
++        }
+         if (nba > 3)
+         {
+           if (!PerformTwoCornerMitre(Index))
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
+index 0c66f1281..e639f3c67 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
+@@ -203,6 +203,16 @@ public:
+   //! @return false, with nothing changed, when the configuration is another
+   Standard_EXPORT bool PerformTwoCornerMitre(const int theIndex);
+ 
++  //! Closes the corner of two fillets of the same constant radius that end
++  //! on one point of a straight edge between their supports (a concave edge
++  //! of the shape) while their other supports end on a face of revolution
++  //! around that edge (a sphere centered on it or a plane normal to it): the
++  //! ball rolls around the edge, the corner is a torus of revolution around
++  //! it. Used when the two fillets have no common support face.
++  //! @param[in] theIndex index of the vertex in the map of vertices and stripes
++  //! @return false, with nothing changed, when the configuration is another
++  Standard_EXPORT bool PerformTwoCornerOnRevolution(const int theIndex);
++
+ protected:
+   Standard_EXPORT ChFi3d_Builder(const TopoDS_Shape& S, const double Ta);
+ 
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
+index 67274d18f..31976c8e3 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
+@@ -903,6 +903,29 @@ occ::handle<Geom_BezierCurve> ChFi3d_Spine(const gp_Pnt& pd,
+   return new Geom_BezierCurve(pol);
+ }
+ 
++//=================================================================================================
++
++static gp_Pnt2d VertexParameters(const TopoDS_Vertex& theV, const TopoDS_Face& theF)
++{
++  // The parameters of the vertex on the face, or of its projection
++  // on the surface of the face if the vertex is not on the face (a
++  // common face of surfdatas further from the corner).
++  for (TopExp_Explorer anExp(theF, TopAbs_VERTEX); anExp.More(); anExp.Next())
++  {
++    if (anExp.Current().IsSame(theV))
++    {
++      return BRep_Tool::Parameters(theV, theF);
++    }
++  }
++  GeomAPI_ProjectPointOnSurf aProj(BRep_Tool::Pnt(theV), BRep_Tool::Surface(theF));
++  double                     aU = 0., aV = 0.;
++  if (aProj.NbPoints() > 0)
++  {
++    aProj.LowerDistanceParameters(aU, aV);
++  }
++  return gp_Pnt2d(aU, aV);
++}
++
+ //=======================================================================
+ // function : IsInFront
+ // purpose  : Checks if surfdata i1 and i2 are face to face
+@@ -962,7 +985,7 @@ bool ChFi3d_IsInFront(TopOpeBRepDS_DataStructure&       DStr,
+     gp_Pnt2d P2d;
+     if (Check2dDistance)
+     {
+-      P2d = BRep_Tool::Parameters(Vtx, face);
++      P2d = VertexParameters(Vtx, face);
+     }
+     if (ChFi3d_IntTraces(fd1,
+                          pref1,
+@@ -1014,7 +1037,7 @@ bool ChFi3d_IsInFront(TopOpeBRepDS_DataStructure&       DStr,
+     gp_Pnt2d P2d;
+     if (Check2dDistance)
+     {
+-      P2d = BRep_Tool::Parameters(Vtx, face);
++      P2d = VertexParameters(Vtx, face);
+     }
+     if (ChFi3d_IntTraces(fd1,
+                          pref1,
+@@ -1090,7 +1113,7 @@ bool ChFi3d_IsInFront(TopOpeBRepDS_DataStructure&       DStr,
+     gp_Pnt2d P2d;
+     if (Check2dDistance)
+     {
+-      P2d = BRep_Tool::Parameters(Vtx, face);
++      P2d = VertexParameters(Vtx, face);
+     }
+     if (ChFi3d_IntTraces(fd1,
+                          pref1,
+@@ -1166,7 +1189,7 @@ bool ChFi3d_IsInFront(TopOpeBRepDS_DataStructure&       DStr,
+     gp_Pnt2d P2d;
+     if (Check2dDistance)
+     {
+-      P2d = BRep_Tool::Parameters(Vtx, face);
++      P2d = VertexParameters(Vtx, face);
+     }
+     if (ChFi3d_IntTraces(fd1,
+                          pref1,
+@@ -3506,24 +3529,25 @@ void ChFi3d_StripeEdgeInter(const occ::handle<ChFiDS_Stripe>& theStripe1,
+       Ishape21                           = aDat2->IndexOfS1();
+       Ishape22                           = aDat2->IndexOfS2();
+ 
+-      // Find those FaceInterferences able to intersect
++      // Find those FaceInterferences able to intersect (an index 0 is no
++      // face: a side of a corner piece shrinking to a point)
+       ChFiDS_FaceInterference aFI1, aFI2;
+-      if (Ishape11 == Ishape21)
++      if (Ishape11 > 0 && Ishape11 == Ishape21)
+       {
+         aFI1 = aDat1->InterferenceOnS1();
+         aFI2 = aDat2->InterferenceOnS1();
+       }
+-      else if (Ishape11 == Ishape22)
++      else if (Ishape11 > 0 && Ishape11 == Ishape22)
+       {
+         aFI1 = aDat1->InterferenceOnS1();
+         aFI2 = aDat2->InterferenceOnS2();
+       }
+-      else if (Ishape12 == Ishape21)
++      else if (Ishape12 > 0 && Ishape12 == Ishape21)
+       {
+         aFI1 = aDat1->InterferenceOnS2();
+         aFI2 = aDat2->InterferenceOnS1();
+       }
+-      else if (Ishape12 == Ishape22)
++      else if (Ishape12 > 0 && Ishape12 == Ishape22)
+       {
+         aFI1 = aDat1->InterferenceOnS2();
+         aFI2 = aDat2->InterferenceOnS2();
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
+index 07ae7d7b1..1d2205734 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
+@@ -17,6 +17,7 @@
+ //  Modified by skv - Mon Jun  7 18:38:57 2004 OCC5898
+ //  Modified by skv - Thu Aug 21 11:55:58 2008 OCC20222
+ 
++#include <Bnd_Box2d.hxx>
+ #include <Adaptor2d_Curve2d.hxx>
+ #include <Adaptor3d_CurveOnSurface.hxx>
+ #include <BRepTopAdaptor_FClass2d.hxx>
+@@ -2107,6 +2108,28 @@ bool ChFi3d_Builder::PerformCapOnEndFace(const int theIndex)
+ 
+   const occ::handle<GeomAdaptor_Surface> aFilletSurf =
+     new GeomAdaptor_Surface(DStr.Surface(Fd->Surf()).Surface());
++  // The parameters of the surfdata on its surface, with a margin.
++  Bnd_Box2d aFilletBox;
++  for (int aSide = 1; aSide <= 2; ++aSide)
++  {
++    const ChFiDS_FaceInterference& aFi = Fd->Interference(aSide);
++    if (aFi.PCurveOnSurf().IsNull())
++    {
++      continue;
++    }
++    for (int i = 0; i <= 20; ++i)
++    {
++      const double aT =
++        aFi.FirstParameter() + (aFi.LastParameter() - aFi.FirstParameter()) * i / 20.;
++      aFilletBox.Add(aFi.PCurveOnSurf()->Value(aT));
++    }
++  }
++  if (!aFilletBox.IsVoid())
++  {
++    double aU1 = 0., aV1 = 0., aU2 = 0., aV2 = 0.;
++    aFilletBox.Get(aU1, aV1, aU2, aV2);
++    aFilletBox.Enlarge(0.1 * std::max(aU2 - aU1, aV2 - aV1));
++  }
+   for (int aFadArc = 1; aFadArc <= 2; aFadArc++)
+   {
+     const ChFiDS_CommonPoint& aCPad = Fd->Vertex(isfirst, aFadArc);
+@@ -2171,7 +2194,12 @@ bool ChFi3d_Builder::PerformCapOnEndFace(const int theIndex)
+       }
+       IntCurveSurface_HInter anInter;
+       anInter.Perform(new BRepAdaptor_Curve(anEdge), aFilletSurf);
+-      isCrossed = anInter.IsDone() && anInter.NbPoints() > 0;
++      for (int i = 1; anInter.IsDone() && i <= anInter.NbPoints() && !isCrossed; ++i)
++      {
++        // Only on the surfdata: an elementary fillet surface goes on beyond it.
++        isCrossed = aFilletBox.IsVoid()
++                    || !aFilletBox.IsOut(gp_Pnt2d(anInter.Point(i).U(), anInter.Point(i).V()));
++      }
+     }
+     if (isCrossed)
+     {
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C2.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C2.cxx
+index 52e6228c9..d695012e1 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C2.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C2.cxx
+@@ -15,6 +15,21 @@
+ // commercial license or contractual agreement.
+ 
+ #include <Adaptor2d_Curve2d.hxx>
++#include <BRepTools.hxx>
++#include <BRepAdaptor_Curve.hxx>
++#include <BRepAdaptor_Surface.hxx>
++#include <ChFiDS_FilSpine.hxx>
++#include <ChFiDS_Regul.hxx>
++#include <ElCLib.hxx>
++#include <ElSLib.hxx>
++#include <Geom2d_Line.hxx>
++#include <Geom2dAPI_Interpolate.hxx>
++#include <Geom_ToroidalSurface.hxx>
++#include <NCollection_HArray1.hxx>
++#include <gp.hxx>
++#include <gp_Ax3.hxx>
++#include <gp_Lin.hxx>
++#include <TopOpeBRepDS_Surface.hxx>
+ #include <Blend_CurvPointFuncInv.hxx>
+ #include <Blend_FuncInv.hxx>
+ #include <BRepBlend_Line.hxx>
+@@ -1333,3 +1348,472 @@ bool ChFi3d_Builder::PerformTwoCornerMitre(const int theIndex)
+   }
+   return true;
+ }
++
++//=================================================================================================
++
++bool ChFi3d_Builder::PerformTwoCornerOnRevolution(const int theIndex)
++{
++  // The ball touching the common end point of the two fillets on the pivot
++  // edge turns around the pivot from the end section of one fillet to the
++  // end section of the other. Its center stays at the radius from the
++  // pivot, so the corner is a torus around the pivot whose tube touches the
++  // axis. The torus stays tangent to a face of revolution around the pivot,
++  // on which the other supports of the fillets end.
++  const TopoDS_Vertex&        Vtx  = myVDataMap.FindKey(theIndex);
++  TopOpeBRepDS_DataStructure& DStr = myDS->ChangeDS();
++  if (myVDataMap(theIndex).Extent() != 2)
++  {
++    return false;
++  }
++  NCollection_List<occ::handle<ChFiDS_Stripe>>::Iterator anIt(myVDataMap(theIndex));
++  occ::handle<ChFiDS_Stripe>                             st1 = anIt.Value();
++  anIt.Next();
++  occ::handle<ChFiDS_Stripe> st2 = anIt.Value();
++  if (st1 == st2)
++  {
++    return false;
++  }
++  const occ::handle<ChFiDS_FilSpine> aSp1 = occ::down_cast<ChFiDS_FilSpine>(st1->Spine());
++  const occ::handle<ChFiDS_FilSpine> aSp2 = occ::down_cast<ChFiDS_FilSpine>(st2->Spine());
++  if (aSp1.IsNull() || aSp2.IsNull() || !aSp1->IsConstant() || !aSp2->IsConstant()
++      || std::abs(aSp1->Radius() - aSp2->Radius()) > Precision::Confusion())
++  {
++    return false;
++  }
++  const double                 aR    = aSp1->Radius();
++  int                          Sens1 = 0, Sens2 = 0;
++  const int                    Isd1     = ChFi3d_IndexOfSurfData(Vtx, st1, Sens1);
++  const int                    Isd2     = ChFi3d_IndexOfSurfData(Vtx, st2, Sens2);
++  occ::handle<ChFiDS_SurfData> sd1      = st1->SetOfSurfData()->Value(Isd1);
++  occ::handle<ChFiDS_SurfData> sd2      = st2->SetOfSurfData()->Value(Isd2);
++  const bool                   isfirst1 = (Sens1 == 1);
++  const bool                   isfirst2 = (Sens2 == 1);
++  for (int j = 1; j <= 2; ++j)
++  {
++    if (sd1->Index(j) <= 0 || sd2->Index(j) <= 0)
++    {
++      return false;
++    }
++    for (int k = 1; k <= 2; ++k)
++    {
++      if (sd1->Index(j) == sd2->Index(k))
++      {
++        return false; // a common support face: the other corners
++      }
++    }
++  }
++
++  // The pivot: a straight edge on which both fillets end at the same point,
++  // between plane supports through it.
++  const double aTol  = std::max(10. * tolapp3d, Precision::Confusion());
++  int          IArc1 = 0, IArc2 = 0;
++  for (int j = 1; j <= 2 && IArc1 == 0; ++j)
++  {
++    for (int k = 1; k <= 2 && IArc1 == 0; ++k)
++    {
++      const ChFiDS_CommonPoint& aCP1 = sd1->Vertex(isfirst1, j);
++      const ChFiDS_CommonPoint& aCP2 = sd2->Vertex(isfirst2, k);
++      if (aCP1.IsOnArc() && aCP2.IsOnArc() && aCP1.Arc().IsSame(aCP2.Arc())
++          && aCP1.Point().Distance(aCP2.Point()) <= aTol)
++      {
++        IArc1 = j;
++        IArc2 = k;
++      }
++    }
++  }
++  if (IArc1 == 0)
++  {
++    return false;
++  }
++  const int          ICo1   = 3 - IArc1;
++  const int          ICo2   = 3 - IArc2;
++  const TopoDS_Edge& aPivot = sd1->Vertex(isfirst1, IArc1).Arc();
++  BRepAdaptor_Curve  aPivC(aPivot);
++  if (aPivC.GetType() != GeomAbs_Line)
++  {
++    return false;
++  }
++  const gp_Dir aD  = aPivC.Line().Direction();
++  const gp_Pnt aPw = sd1->Vertex(isfirst1, IArc1).Point();
++
++  // The center of the end section of each fillet: at the radius from the
++  // pivot point on the normal to its plane support, and from the end of its
++  // other trace.
++  gp_Pnt     aO[2];
++  const auto aCenter = [&](const occ::handle<ChFiDS_SurfData>& theSd,
++                           const bool                          theIsFirst,
++                           const int                           theIArc,
++                           gp_Pnt&                             theO) -> bool {
++    const TopoDS_Face   aW = TopoDS::Face(DStr.Shape(theSd->Index(theIArc)));
++    BRepAdaptor_Surface aWAd(aW, false);
++    if (aWAd.GetType() != GeomAbs_Plane)
++    {
++      return false;
++    }
++    const gp_Dir aN = aWAd.Plane().Axis().Direction();
++    if (std::abs(aN.Dot(aD)) > Precision::Angular())
++    {
++      return false;
++    }
++    const gp_Pnt& aQ  = theSd->Vertex(theIsFirst, 3 - theIArc).Point();
++    const gp_Pnt  aOp = aPw.Translated(aR * gp_Vec(aN));
++    const gp_Pnt  aOm = aPw.Translated(-aR * gp_Vec(aN));
++    const double  aDp = std::abs(aOp.Distance(aQ) - aR);
++    const double  aDm = std::abs(aOm.Distance(aQ) - aR);
++    theO              = aDp < aDm ? aOp : aOm;
++    return std::min(aDp, aDm) <= aTol;
++  };
++  if (!aCenter(sd1, isfirst1, IArc1, aO[0]) || !aCenter(sd2, isfirst2, IArc2, aO[1]))
++  {
++    return false;
++  }
++
++  // The face of revolution: beyond the arcs where the other traces end.
++  const ChFiDS_CommonPoint& aQ1 = sd1->Vertex(isfirst1, ICo1);
++  const ChFiDS_CommonPoint& aQ2 = sd2->Vertex(isfirst2, ICo2);
++  if (!aQ1.IsOnArc() || !aQ2.IsOnArc() || !myEFMap.Contains(aQ1.Arc())
++      || !myEFMap.Contains(aQ2.Arc()))
++  {
++    return false;
++  }
++  TopoDS_Face aS;
++  for (NCollection_List<TopoDS_Shape>::Iterator anIt1(myEFMap(aQ1.Arc()));
++       anIt1.More() && aS.IsNull();
++       anIt1.Next())
++  {
++    if (anIt1.Value().IsSame(DStr.Shape(sd1->Index(ICo1))))
++    {
++      continue;
++    }
++    for (NCollection_List<TopoDS_Shape>::Iterator anIt2(myEFMap(aQ2.Arc())); anIt2.More();
++         anIt2.Next())
++    {
++      if (anIt2.Value().IsSame(anIt1.Value()))
++      {
++        aS = TopoDS::Face(anIt1.Value());
++        break;
++      }
++    }
++  }
++  if (aS.IsNull())
++  {
++    return false;
++  }
++  BRepAdaptor_Surface aSAd(aS, false);
++  if (aSAd.GetType() == GeomAbs_Sphere)
++  {
++    if (gp_Lin(aPw, aD).Distance(aSAd.Sphere().Location()) > aTol)
++    {
++      return false;
++    }
++  }
++  else if (aSAd.GetType() == GeomAbs_Plane)
++  {
++    if (!aSAd.Plane().Axis().Direction().IsParallel(aD, Precision::Angular()))
++    {
++      return false;
++    }
++  }
++  else
++  {
++    return false;
++  }
++
++  // The torus around the pivot, its angle from the first end section to
++  // the second one (the turn of the ball, less than a half turn). The end
++  // section of the first fillet on the torus goes from its point on the face
++  // of revolution to the pivot (the point of the torus on its axis) through
++  // the middle of the section; the axis is oriented so that this is the
++  // increasing direction of the second parameter, as for the toric corner
++  // between planes (ChFiKPart_MakeRotule).
++  gp_Pnt aMid;
++  {
++    const occ::handle<Geom_Surface>& aSurf1 = DStr.Surface(sd1->Surf()).Surface();
++    const gp_Pnt2d                   aUV1 =
++      sd1->Interference(1).PCurveOnSurf()->Value(sd1->Interference(1).Parameter(isfirst1));
++    const gp_Pnt2d aUV2 =
++      sd1->Interference(2).PCurveOnSurf()->Value(sd1->Interference(2).Parameter(isfirst1));
++    aMid = aSurf1->Value(0.5 * (aUV1.X() + aUV2.X()), 0.5 * (aUV1.Y() + aUV2.Y()));
++  }
++  const double aTwoPi = 2. * M_PI;
++  gp_Ax3       anAx;
++  double       aAlpha = 0., aVS = 0., aVP = 0.;
++  for (int anAxisSide = 0; anAxisSide < 2; ++anAxisSide)
++  {
++    const gp_Dir aZ    = anAxisSide == 0 ? aD : aD.Reversed();
++    anAx               = gp_Ax3(aPw, aZ, gp_Dir(gp_Vec(aPw, aO[0])));
++    const double aTurn = gp_Vec(aPw, aO[0]).AngleWithRef(gp_Vec(aPw, aO[1]), gp_Vec(aZ));
++    if (aTurn < 0.)
++    {
++      anAx.YReverse();
++    }
++    aAlpha    = std::abs(aTurn);
++    double aU = 0., aVM = 0.;
++    ElSLib::TorusParameters(anAx, aR, aR, aQ1.Point(), aU, aVS);
++    ElSLib::TorusParameters(anAx, aR, aR, aMid, aU, aVM);
++    const double aToPw  = std::fmod(M_PI - aVS + 2. * aTwoPi, aTwoPi);
++    const double aToMid = std::fmod(aVM - aVS + 2. * aTwoPi, aTwoPi);
++    if (aToMid < aToPw)
++    {
++      aVP = aVS + aToPw;
++      break;
++    }
++  }
++  if (aVP - aVS < Precision::Angular() || aAlpha < Precision::Angular()
++      || aAlpha > M_PI - Precision::Angular())
++  {
++    return false;
++  }
++  const occ::handle<Geom_ToroidalSurface> aTor = new Geom_ToroidalSurface(anAx, aR, aR);
++
++  // The torus is tangent to the face of revolution all along the turn, and
++  // ends on the end section of the second fillet.
++  const occ::handle<Geom_Surface> aSSurf = BRep_Tool::Surface(aS);
++  for (int i = 1; i <= 3; ++i)
++  {
++    gp_Pnt aP;
++    gp_Vec aDu, aDv;
++    aTor->D1(aAlpha * i / 4., aVS, aP, aDu, aDv);
++    GeomAPI_ProjectPointOnSurf aProj(aP, aSSurf);
++    if (aProj.NbPoints() == 0 || aProj.LowerDistance() > aTol)
++    {
++      return false;
++    }
++    double aUs = 0., aVs = 0.;
++    aProj.LowerDistanceParameters(aUs, aVs);
++    gp_Pnt aPs;
++    gp_Vec aDus, aDvs;
++    aSSurf->D1(aUs, aVs, aPs, aDus, aDvs);
++    const gp_Vec aNt = aDu.Crossed(aDv);
++    const gp_Vec aNs = aDus.Crossed(aDvs);
++    if (aNt.Magnitude() < gp::Resolution() || aNs.Magnitude() < gp::Resolution()
++        || !gp_Dir(aNt).IsParallel(gp_Dir(aNs), 1.e-3))
++    {
++      return false;
++    }
++  }
++  if (aTor->Value(aAlpha, aVS).Distance(aQ2.Point()) > aTol)
++  {
++    return false;
++  }
++
++  // The corner data: side 1 on the face of revolution, side 2 at the point
++  // of the pivot.
++  occ::handle<ChFiDS_Stripe>   corner = new ChFiDS_Stripe();
++  occ::handle<ChFiDS_SurfData> coin   = new ChFiDS_SurfData();
++  corner->ChangeSetOfSurfData()       = new NCollection_HSequence<occ::handle<ChFiDS_SurfData>>();
++  corner->ChangeSetOfSurfData()->Append(coin);
++  coin->ChangeSurf(DStr.AddSurface(TopOpeBRepDS_Surface(aTor, 0.)));
++
++  // Orientation of the corner and transition on the face of revolution, as
++  // for the toric corner between planes (ChFiKPart_MakeRotule).
++  TopAbs_Orientation aTrans = TopAbs_REVERSED;
++  {
++    gp_Pnt aP;
++    gp_Vec aDu, aDv;
++    aTor->D1(0.5 * aAlpha, aVS, aP, aDu, aDv);
++    const gp_Dir               aDrot(aDu.Crossed(aDv));
++    GeomAPI_ProjectPointOnSurf aProj(aP, aSSurf);
++    double                     aUs = 0., aVs = 0.;
++    aProj.LowerDistanceParameters(aUs, aVs);
++    gp_Pnt aPs;
++    gp_Vec aDus, aDvs;
++    aSSurf->D1(aUs, aVs, aPs, aDus, aDvs);
++    gp_Vec aNat   = aDus.Crossed(aDvs);
++    gp_Vec aNFace = aNat;
++    if (aS.Orientation() == TopAbs_REVERSED)
++    {
++      aNFace.Reverse();
++    }
++    if (aDrot.Dot(aNat) <= 0.)
++    {
++      aTrans = TopAbs_FORWARD;
++    }
++    coin->ChangeOrientation() = aDrot.Dot(aNFace) <= 0. ? TopAbs_REVERSED : TopAbs_FORWARD;
++  }
++
++  // The trace on the face of revolution: a circle of the torus, its pcurve
++  // on the face through points of it.
++  const occ::handle<Geom_Curve>              aTrace = aTor->VIso(aVS);
++  const int                                  aNb    = 24;
++  occ::handle<NCollection_HArray1<gp_Pnt2d>> aUVs   = new NCollection_HArray1<gp_Pnt2d>(1, aNb + 1);
++  occ::handle<NCollection_HArray1<double>>   aTs    = new NCollection_HArray1<double>(1, aNb + 1);
++  double                                     aTolTrace = Precision::Confusion();
++  double                                     aUMin = 0., aUMax = 0., aVMin = 0., aVMax = 0.;
++  BRepTools::UVBounds(aS, aUMin, aUMax, aVMin, aVMax);
++  for (int i = 0; i <= aNb; ++i)
++  {
++    const double               aT = aAlpha * i / aNb;
++    const gp_Pnt               aP = aTrace->Value(aT);
++    GeomAPI_ProjectPointOnSurf aProj(aP, aSSurf);
++    if (aProj.NbPoints() == 0)
++    {
++      return false;
++    }
++    double aUs = 0., aVs = 0.;
++    aProj.LowerDistanceParameters(aUs, aVs);
++    if (i == 0)
++    {
++      // in the parametric domain of the face
++      if (aSSurf->IsUPeriodic())
++      {
++        aUs = ElCLib::InPeriod(aUs,
++                               aUMin - Precision::PConfusion(),
++                               aUMin - Precision::PConfusion() + aSSurf->UPeriod());
++      }
++      if (aSSurf->IsVPeriodic())
++      {
++        aVs = ElCLib::InPeriod(aVs,
++                               aVMin - Precision::PConfusion(),
++                               aVMin - Precision::PConfusion() + aSSurf->VPeriod());
++      }
++    }
++    else
++    {
++      // stay on the same sheet of a periodic surface
++      const gp_Pnt2d& aPrev = aUVs->Value(i);
++      if (aSSurf->IsUPeriodic())
++      {
++        aUs = ElCLib::InPeriod(aUs,
++                               aPrev.X() - 0.5 * aSSurf->UPeriod(),
++                               aPrev.X() + 0.5 * aSSurf->UPeriod());
++      }
++      if (aSSurf->IsVPeriodic())
++      {
++        aVs = ElCLib::InPeriod(aVs,
++                               aPrev.Y() - 0.5 * aSSurf->VPeriod(),
++                               aPrev.Y() + 0.5 * aSSurf->VPeriod());
++      }
++    }
++    aUVs->SetValue(i + 1, gp_Pnt2d(aUs, aVs));
++    aTs->SetValue(i + 1, aT);
++    aTolTrace = std::max(aTolTrace, aProj.LowerDistance());
++  }
++  Geom2dAPI_Interpolate anInt(aUVs, aTs, false, Precision::PConfusion());
++  anInt.Perform();
++  if (!anInt.IsDone())
++  {
++    return false;
++  }
++  const occ::handle<Geom2d_Curve> aPCOnS(anInt.Curve());
++  for (int i = 0; i < 4 * aNb; ++i)
++  {
++    const double   aT  = aAlpha * (i + 0.5) / (4 * aNb);
++    const gp_Pnt2d aUV = aPCOnS->Value(aT);
++    aTolTrace = std::max(aTolTrace, aTrace->Value(aT).Distance(aSSurf->Value(aUV.X(), aUV.Y())));
++  }
++  ChFiDS_FaceInterference& aFi1 = coin->ChangeInterferenceOnS1();
++  aFi1.SetInterference(
++    DStr.AddCurve(TopOpeBRepDS_Curve(aTrace, std::max(tolapp3d, 1.5 * aTolTrace))),
++    aTrans,
++    aPCOnS,
++    new Geom2d_Line(gp_Pnt2d(0., aVS), gp::DX2d()));
++  aFi1.SetFirstParameter(0.);
++  aFi1.SetLastParameter(aAlpha);
++  ChFiDS_FaceInterference& aFi2 = coin->ChangeInterferenceOnS2();
++  aFi2.SetInterference(DStr.AddCurve(TopOpeBRepDS_Curve(occ::handle<Geom_Curve>(), 0.)),
++                       aTrans,
++                       occ::handle<Geom2d_Curve>(),
++                       new Geom2d_Line(gp_Pnt2d(0., aVP), gp::DX2d()));
++  aFi2.SetFirstParameter(0.);
++  aFi2.SetLastParameter(aAlpha);
++  coin->ChangeVertexFirstOnS1() = aQ1;
++  coin->ChangeVertexLastOnS1()  = aQ2;
++  coin->ChangeVertexFirstOnS2() = sd1->Vertex(isfirst1, IArc1);
++  coin->ChangeVertexLastOnS2()  = sd2->Vertex(isfirst2, IArc2);
++
++  // The edges between the corner and the fillets: their end sections.
++  const ChFiDS_CommonPoint& Pf1          = coin->VertexFirstOnS1();
++  const ChFiDS_CommonPoint& Pf2          = coin->VertexFirstOnS2();
++  const ChFiDS_CommonPoint& Pl1          = coin->VertexLastOnS1();
++  const int                 If1          = ChFi3d_IndexPointInDS(Pf1, DStr);
++  const int                 If2          = ChFi3d_IndexPointInDS(Pf2, DStr);
++  const int                 Il1          = ChFi3d_IndexPointInDS(Pl1, DStr);
++  const int                 Il2          = If2;
++  const auto                anEndSection = [&](const occ::handle<ChFiDS_Stripe>&   theSt,
++                                const occ::handle<ChFiDS_SurfData>& theSd,
++                                const bool                          theIsFirst,
++                                const int                           theICo,
++                                const int                           theIArc,
++                                const double                        theU,
++                                occ::handle<Geom2d_Curve>&          thePCCorner,
++                                double&                             thePar1,
++                                double&                             thePar2) -> int {
++    const ChFiDS_CommonPoint& aP1 = theU == 0. ? Pf1 : Pl1;
++    occ::handle<Geom_Curve>   aC3d;
++    double                    aTolReached = tolapp3d;
++    ChFi3d_ComputeArete(aP1,
++                        gp_Pnt2d(theU, aVS),
++                        Pf2,
++                        gp_Pnt2d(theU, aVP),
++                        aTor,
++                        aC3d,
++                        thePCCorner,
++                        thePar1,
++                        thePar2,
++                        tolapp3d,
++                        tol2d,
++                        aTolReached,
++                        0);
++    const double aPar  = theSd->Interference(theIArc).Parameter(theIsFirst);
++    double       aTolR = tolapp3d;
++    ChFi3d_ComputePCurv(aC3d,
++                        theSd->Interference(theICo).PCurveOnSurf()->Value(aPar),
++                        theSd->Interference(theIArc).PCurveOnSurf()->Value(aPar),
++                        theSt->ChangePCurve(theIsFirst),
++                        DStr.Surface(theSd->Surf()).Surface(),
++                        thePar1,
++                        thePar2,
++                        tolapp3d,
++                        aTolR);
++    const int    anIC = DStr.AddCurve(TopOpeBRepDS_Curve(aC3d, std::max(aTolReached, aTolR)));
++    ChFiDS_Regul aRegul;
++    aRegul.SetCurve(anIC);
++    aRegul.SetS1(coin->Surf(), false);
++    aRegul.SetS2(theSd->Surf(), false);
++    myRegul.Append(aRegul);
++    theSd->ChangeInterference(theICo).SetParameter(aPar, theIsFirst);
++    return anIC;
++  };
++  double    P1deb = 0., P2deb = 0., P1fin = 0., P2fin = 0.;
++  const int Icf =
++    anEndSection(st1, sd1, isfirst1, ICo1, IArc1, 0., corner->ChangeFirstPCurve(), P1deb, P2deb);
++  const int Icl =
++    anEndSection(st2, sd2, isfirst2, ICo2, IArc2, aAlpha, corner->ChangeLastPCurve(), P1fin, P2fin);
++  corner->ChangeFirstCurve(Icf);
++  corner->ChangeFirstParameters(P1deb, P2deb);
++  corner->ChangeIndexFirstPointOnS1(If1);
++  corner->ChangeIndexFirstPointOnS2(If2);
++  corner->ChangeLastCurve(Icl);
++  corner->ChangeLastParameters(P1fin, P2fin);
++  corner->ChangeIndexLastPointOnS1(Il1);
++  corner->ChangeIndexLastPointOnS2(Il2);
++  coin->ChangeIndexOfS1(DStr.AddShape(aS));
++  coin->ChangeIndexOfS2(0);
++  corner->SetSolidIndex(st1->SolidIndex());
++
++  // The stripes end on these edges.
++  st1->SetCurve(Icf, isfirst1);
++  st1->SetIndexPoint(If1, isfirst1, ICo1);
++  st1->SetIndexPoint(If2, isfirst1, IArc1);
++  st1->SetParameters(isfirst1, P1deb, P2deb);
++  if (ICo1 == 2)
++  {
++    st1->SetOrientation(TopAbs_REVERSED, isfirst1);
++  }
++  st2->SetCurve(Icl, isfirst2);
++  st2->SetIndexPoint(Il1, isfirst2, ICo2);
++  st2->SetIndexPoint(Il2, isfirst2, IArc2);
++  st2->SetParameters(isfirst2, P1fin, P2fin);
++  if (ICo2 == 2)
++  {
++    st2->SetOrientation(TopAbs_REVERSED, isfirst2);
++  }
++  if (!myEVIMap.IsBound(Vtx))
++  {
++    myEVIMap.Bind(Vtx, NCollection_List<int>());
++  }
++  myEVIMap.ChangeFind(Vtx).Append(coin->Surf());
++  myListStripe.Append(corner);
++  return true;
++}
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx
+index 405d59bb0..f501e6bda 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx
+@@ -584,6 +584,13 @@ void ChFi3d_FilBuilder::PerformTwoCorner(const int Index)
+                               v2dfac2,
+                               tolapp3d,
+                               2.e-4);
++        if (!sameparam && Hpivot.IsNull())
++        {
++          // The fillets end on two different edges: there is no pivot to
++          // fill the corner on (the ball does not fit into the corner, the
++          // fillets would go on along edges which are not filleted).
++          throw Standard_Failure("TwoCorner : the fillets end on different edges");
++        }
+         GeomFill_ConstrainedFilling fil(8, 20);
+         if (sameparam)
+         {
+diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+index 927f4769f..0e9cf901b 100644
+--- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
++++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+@@ -1320,3 +1320,78 @@ TEST(BRepFilletAPI_MakeFilletTest, ConstantRadius_FollowsRollingBall)
+   }
+   EXPECT_EQ(aNbFillets, 1);
+ }
++
++//=================================================================================================
++// Corners of a fillet around a concave edge
++
++// A cube of 20 with fillets of radius 6 on all edges and a square hole of 8 x 8
++// through it (FreeCAD issue 20085). The walls of the hole go along the tangent
++// lines of the fillets of the cube, so the edges of the hole are lines on the
++// cylinders of these fillets. At each corner of the hole the ball of a fillet
++// of the edges of the hole rolls around the vertical edge of the hole: the
++// corner is a torus whose minor and major radii are the radius of the fillet.
++// One corner of each end of the hole was built inverted.
++TEST(BRepFilletAPI_MakeFilletTest, SquareHoleInRoundedCube_RollsBallAroundHoleEdges)
++{
++  const TopoDS_Shape aBox =
++    BRepPrimAPI_MakeBox(gp_Pnt(-10.0, -10.0, -10.0), 20.0, 20.0, 20.0).Shape();
++  BRepFilletAPI_MakeFillet aRound(aBox);
++  for (TopExp_Explorer anExp(aBox, TopAbs_EDGE); anExp.More(); anExp.Next())
++  {
++    aRound.Add(6.0, TopoDS::Edge(anExp.Current()));
++  }
++  aRound.Build();
++  ASSERT_TRUE(aRound.IsDone());
++
++  const TopoDS_Shape aTool = BRepPrimAPI_MakeBox(gp_Pnt(-4.0, -4.0, -11.0), 8.0, 8.0, 22.0).Shape();
++  BRepAlgoAPI_Cut    aCut(aRound.Shape(), aTool);
++  ASSERT_TRUE(aCut.IsDone());
++  const TopoDS_Shape& aHoled = aCut.Shape();
++
++  BRepFilletAPI_MakeFillet                                      aFillet(aHoled);
++  NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> anEdges;
++  TopExp::MapShapes(aHoled, TopAbs_EDGE, anEdges);
++  for (int i = 1; i <= anEdges.Extent(); ++i)
++  {
++    const TopoDS_Edge& anEdge = TopoDS::Edge(anEdges(i));
++    GProp_GProps       aProps;
++    BRepGProp::LinearProperties(anEdge, aProps);
++    const gp_Pnt aMid = aProps.CentreOfMass();
++    if (std::abs(std::abs(aMid.Z()) - 10.0) < 1.e-6
++        && std::abs(std::abs(aMid.X()) + std::abs(aMid.Y()) - 4.0) < 1.e-6)
++    {
++      aFillet.Add(2.0, anEdge);
++    }
++  }
++  ASSERT_EQ(aFillet.NbContours(), 8);
++
++  aFillet.Build();
++  ASSERT_TRUE(aFillet.IsDone());
++  const TopoDS_Shape& aResult = aFillet.Shape();
++  EXPECT_TRUE(BRepCheck_Analyzer(aResult).IsValid());
++
++  double aMaxTol = 0.0;
++  for (TopExp_Explorer anExp(aResult, TopAbs_VERTEX); anExp.More(); anExp.Next())
++  {
++    aMaxTol = std::max(aMaxTol, BRep_Tool::Tolerance(TopoDS::Vertex(anExp.Current())));
++  }
++  EXPECT_LT(aMaxTol, 1.e-3);
++
++  int aNbTori = 0;
++  for (TopExp_Explorer anExp(aResult, TopAbs_FACE); anExp.More(); anExp.Next())
++  {
++    BRepAdaptor_Surface aSurf(TopoDS::Face(anExp.Current()));
++    if (aSurf.GetType() == GeomAbs_Torus)
++    {
++      ++aNbTori;
++      EXPECT_NEAR(aSurf.Torus().MajorRadius(), 2.0, 1.e-9);
++      EXPECT_NEAR(aSurf.Torus().MinorRadius(), 2.0, 1.e-9);
++    }
++  }
++  EXPECT_EQ(aNbTori, 8);
++
++  GProp_GProps aBefore, anAfter;
++  BRepGProp::VolumeProperties(aHoled, aBefore);
++  BRepGProp::VolumeProperties(aResult, anAfter);
++  EXPECT_NEAR(aBefore.Mass() - anAfter.Mass(), 129.34, 0.05);
++}
+diff --git a/tests/bugs/modalg_8/fillet_rounded_cube_square_hole b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole
+new file mode 100644
+index 000000000..552c4427a
+--- /dev/null
++++ b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole
+@@ -0,0 +1,31 @@
++puts "============"
++puts "Modeling Algorithms - Fillet of the edges of a square hole in a rounded cube"
++puts "(FreeCAD issue 20085: cube 20 with fillets of radius 6, square hole 8 x 8)"
++puts "============"
++puts ""
++
++# The walls of the hole go along the tangent lines of the fillets of the
++# cube, so the edges of the hole are the lines where the walls meet the
++# cylinders of the fillets of the cube. At each corner of the hole the
++# ball rolls around the vertical edge of the hole: the corner is a part
++# of a torus whose minor and major radii are the radius of the fillet,
++# tangent to the sphere of the corner of the cube.
++restore [locate_data_file freecad20085_rounded_cube_pocket.brep] b
++explode b E
++
++blend result b 2 b_10 2 b_13 2 b_33 2 b_35 2 b_41 2 b_43 2 b_57 2 b_58
++
++checkshape result
++checkmaxtol result -ref 1.e-4
++checkprops result -v 5025.77 -s 2159.03
++
++set nbtor 0
++foreach f [explode result F] {
++  mksurface s $f
++  if {[regexp {ToroidalSurface} [dump s]]} {
++    incr nbtor
++  }
++}
++if {$nbtor != 8} {
++  puts "Error: $nbtor toroidal faces instead of 8"
++}
+-- 
+2.43.0
+

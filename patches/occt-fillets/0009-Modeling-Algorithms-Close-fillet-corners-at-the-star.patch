@@ -1,0 +1,481 @@
+From 534b2ac307b6f52dedda835dd1685748e723ee48 Mon Sep 17 00:00:00 2001
+From: Kuzma30 <kuzemkoa@gmail.com>
+Date: Mon, 26 Oct 2026 10:09:17 +0200
+Subject: [PATCH 09/24] Modeling Algorithms - Close fillet corners at the start
+ of a thread on a split cylinder
+
+At the start of a thread cut by a helix (FreeCAD issue 32486) a fillet may
+end on a cylinder that is split into two faces sharing one surface, with
+the smooth edge between them starting at the end vertex. The common edge
+then has both pcurves on that surface in one closed representation.
+
+ChFi3d_CoutureOnVertex took such an edge for a seam because it is closed
+on the surface. The vertex was counted with an extra face and the face
+walk in PerformIntersectionAtEnd ran past the last edge ("Failed to find
+edge"). Only an edge used twice by the face is a seam now. The rebuilt
+piece of the edge between the two faces could then get its pcurves
+swapped, which left both faces with wires jumping by the period; after the
+build such pcurves are swapped back when the other one joins the wire and
+the current one does not.
+
+PerformTwoCorner builds the corner of a convex and a concave fillet (one
+stripe OnSame, the other OnDiff) from the crossing of their traces on the
+common face. There the convex fillet ends with a short surfdata that stops
+before the trace of the concave one, and the corner failed with "No
+intersection pc pc". The neighbouring surfdata were searched only when the
+stripes did not face each other at all; they are searched now also when
+they face each other but their traces do not cross. Without a crossing
+the end surfdata are restored and the old failure stays.
+
+The corner curve on the face opposite to the common one ends on the arc
+where the concave fillet leaves its support. That arc must bound this
+face, but the check did not work and here it bounds another face on the
+same surface, joined to this one by a smooth edge. In that case the piece
+of the arc from the corner to the vertex is added to both faces, as
+PerformIntersectionAtEnd does for such pieces, and the spine edge of the
+OnSame fillet is cut at the vertex, as PerformOneCorner does for an OnSame
+end. Without that the face kept the spine edge and the shell was open.
+
+Tests bugs/modalg_8/fillet_thread_end_on_split_cylinder and
+fillet_thread_convex_concave_corner.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
+---
+ .../TKFillet/ChFi3d/ChFi3d_Builder.cxx        | 127 ++++++++++++++++
+ .../TKFillet/ChFi3d/ChFi3d_Builder_0.cxx      |  15 ++
+ .../TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx  | 142 ++++++++++++++++--
+ .../fillet_thread_convex_concave_corner       |  17 +++
+ .../fillet_thread_end_on_split_cylinder       |  18 +++
+ 5 files changed, 308 insertions(+), 11 deletions(-)
+ create mode 100644 tests/bugs/modalg_8/fillet_thread_convex_concave_corner
+ create mode 100644 tests/bugs/modalg_8/fillet_thread_end_on_split_cylinder
+
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
+index b9acdf589..aaeb86d18 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
+@@ -17,6 +17,8 @@
+ #include <Adaptor2d_Curve2d.hxx>
+ #include <Blend_FuncInv.hxx>
+ #include <BRepBlend_Line.hxx>
++#include <BRep_Builder.hxx>
++#include <BRep_Tool.hxx>
+ #include <BRepLib.hxx>
+ #include <BRepTopAdaptor_TopolTool.hxx>
+ #include <ChFi3d_Builder.hxx>
+@@ -38,12 +40,15 @@
+ #include <Standard_Integer.hxx>
+ #include <NCollection_Map.hxx>
+ #include <TopAbs_ShapeEnum.hxx>
++#include <TopExp.hxx>
+ #include <TopExp_Explorer.hxx>
+ #include <TopoDS.hxx>
+ #include <TopoDS_Edge.hxx>
+ #include <TopoDS_Face.hxx>
+ #include <TopoDS_Shape.hxx>
+ #include <TopoDS_Vertex.hxx>
++#include <TopoDS_Wire.hxx>
++#include <Geom_Surface.hxx>
+ #include <TopOpeBRepBuild_HBuilder.hxx>
+ #include <TopOpeBRepDS_Curve.hxx>
+ #include <TopOpeBRepDS_CurveExplorer.hxx>
+@@ -121,6 +126,127 @@ static void CompleteDS(TopOpeBRepDS_DataStructure& DStr, const TopoDS_Shape& S)
+ 
+ //=================================================================================================
+ 
++// Gap in UV between the ends of theEdge (taken with its orientation in the
++// wire) and the edges of the wire meeting it, for the given pcurve.
++static double WireGapInUV(const TopoDS_Wire&               theWire,
++                          const TopoDS_Edge&               theEdge,
++                          const TopoDS_Face&               theFace,
++                          const occ::handle<Geom2d_Curve>& thePC)
++{
++  TopoDS_Vertex aV[2];
++  TopExp::Vertices(theEdge, aV[0], aV[1]);
++  double aGap = 0.;
++  for (int i = 0; i < 2; ++i)
++  {
++    if (aV[i].IsNull())
++    {
++      continue;
++    }
++    const gp_Pnt2d aUV   = thePC->Value(BRep_Tool::Parameter(aV[i], theEdge));
++    double         aBest = Precision::Infinite();
++    for (TopExp_Explorer anExp(theWire, TopAbs_EDGE); anExp.More(); anExp.Next())
++    {
++      const TopoDS_Edge& anE = TopoDS::Edge(anExp.Current());
++      if (anE.IsSame(theEdge) || BRep_Tool::Degenerated(anE))
++      {
++        continue;
++      }
++      for (TopExp_Explorer aVExp(anE, TopAbs_VERTEX); aVExp.More(); aVExp.Next())
++      {
++        if (!aVExp.Current().IsSame(aV[i]))
++        {
++          continue;
++        }
++        double                          aF, aL;
++        const occ::handle<Geom2d_Curve> aPC = BRep_Tool::CurveOnSurface(anE, theFace, aF, aL);
++        if (!aPC.IsNull())
++        {
++          const gp_Pnt2d aP =
++            aPC->Value(BRep_Tool::Parameter(TopoDS::Vertex(aVExp.Current()), anE));
++          aBest = std::min(aBest, aP.Distance(aUV));
++        }
++      }
++    }
++    if (!Precision::IsInfinite(aBest))
++    {
++      aGap += aBest;
++    }
++  }
++  return aGap;
++}
++
++//=================================================================================================
++
++// Two faces built on one surface handle (a cylinder split by a smooth edge)
++// keep both pcurves of their common edge in a single closed representation,
++// and which one each face gets depends on the edge orientation. Rebuilt
++// pieces of such an edge can come out with the two pcurves swapped, leaving
++// both faces with wires that jump by a period. Swap them back.
++static void FixSwappedPCurves(const TopoDS_Shape& theShape)
++{
++  BRep_Builder aBB;
++  for (TopExp_Explorer aFExp(theShape, TopAbs_FACE); aFExp.More(); aFExp.Next())
++  {
++    const TopoDS_Face&        aFace = TopoDS::Face(aFExp.Current());
++    TopLoc_Location           aLoc;
++    occ::handle<Geom_Surface> aSurf = BRep_Tool::Surface(aFace, aLoc);
++    if (aSurf.IsNull())
++    {
++      continue;
++    }
++    for (TopExp_Explorer aWExp(aFace, TopAbs_WIRE); aWExp.More(); aWExp.Next())
++    {
++      const TopoDS_Wire& aWire = TopoDS::Wire(aWExp.Current());
++      for (TopExp_Explorer anEExp(aWire, TopAbs_EDGE); anEExp.More(); anEExp.Next())
++      {
++        const TopoDS_Edge& anEdge = TopoDS::Edge(anEExp.Current());
++        if (!BRep_Tool::IsClosed(anEdge, aSurf, aLoc))
++        {
++          continue;
++        }
++        int aNbUses = 0;
++        for (TopExp_Explorer anExp(aFace, TopAbs_EDGE); anExp.More(); anExp.Next())
++        {
++          if (anExp.Current().IsSame(anEdge))
++          {
++            ++aNbUses;
++          }
++        }
++        if (aNbUses != 1)
++        {
++          continue; // a true seam
++        }
++        double                          aF, aL;
++        const TopoDS_Edge               anOther = TopoDS::Edge(anEdge.Reversed());
++        const occ::handle<Geom2d_Curve> aPCcur  = BRep_Tool::CurveOnSurface(anEdge, aFace, aF, aL);
++        const occ::handle<Geom2d_Curve> aPCalt  = BRep_Tool::CurveOnSurface(anOther, aFace, aF, aL);
++        if (aPCcur.IsNull() || aPCalt.IsNull())
++        {
++          continue;
++        }
++        const double aGapCur = WireGapInUV(aWire, anEdge, aFace, aPCcur);
++        const double aGapAlt = WireGapInUV(aWire, anEdge, aFace, aPCalt);
++        if (aGapCur < 1.e-3 || aGapAlt > 0.1 * aGapCur)
++        {
++          continue;
++        }
++        // The pcurve meant for this face is the one the other orientation
++        // gets now. The neighbour face uses the opposite orientation, so it
++        // gets the right one back with the same swap.
++        const TopoDS_Edge         anEdgeF = TopoDS::Edge(anEdge.Oriented(TopAbs_FORWARD));
++        double                    aF1, aL1;
++        occ::handle<Geom2d_Curve> aPC1 = BRep_Tool::CurveOnSurface(anEdgeF, aSurf, aLoc, aF1, aL1);
++        occ::handle<Geom2d_Curve> aPC2 =
++          BRep_Tool::CurveOnSurface(TopoDS::Edge(anEdgeF.Reversed()), aSurf, aLoc, aF1, aL1);
++        aBB.UpdateEdge(anEdgeF, aPC2, aPC1, aSurf, aLoc, BRep_Tool::Tolerance(anEdgeF));
++        aBB.Range(anEdgeF, aSurf, aLoc, aF1, aL1);
++      }
++    }
++  }
++}
++
++//=================================================================================================
++
+ ChFi3d_Builder::~ChFi3d_Builder() = default;
+ 
+ //=================================================================================================
+@@ -514,6 +640,7 @@ void ChFi3d_Builder::Compute()
+         ShapeFix::SameParameter(aF, false, SameParTol);
+       }
+     }
++    FixSwappedPCurves(myShapeResult);
+   }
+ }
+ 
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
+index af1688c68..2e4d07ec4 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
+@@ -5920,6 +5920,21 @@ void ChFi3d_CoutureOnVertex(const TopoDS_Face&   F,
+     //      Ecur=TopoDS::Edge(TopoDS_Shape (MapE1(i)));
+     if (BRep_Tool::IsClosed(Ecur, Surf, Loc))
+     {
++      // Two faces built on one surface handle (a cylinder split by a
++      // smooth edge, for instance) make their common edge look closed on
++      // either of them. Only an edge used twice by the face is a seam.
++      int aNbUses = 0;
++      for (TopExp_Explorer anExp(F, TopAbs_EDGE); anExp.More() && aNbUses < 2; anExp.Next())
++      {
++        if (anExp.Current().IsSame(Ecur))
++        {
++          ++aNbUses;
++        }
++      }
++      if (aNbUses < 2)
++      {
++        continue;
++      }
+       TopoDS_Vertex Vf, Vl;
+       TopExp::Vertices(Ecur, Vf, Vl);
+       if (Vf.IsSame(V) || Vl.IsSame(V))
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx
+index bf671a41b..405d59bb0 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx
+@@ -36,6 +36,9 @@
+ #include <ChFiKPart_ComputeData.hxx>
+ #include <Geom_BSplineSurface.hxx>
+ #include <Geom2d_TrimmedCurve.hxx>
++#include <Geom_TrimmedCurve.hxx>
++#include <Geom_Surface.hxx>
++#include <gp_Vec2d.hxx>
+ #include <Geom2dAdaptor_Curve.hxx>
+ #include <Geom2dConvert.hxx>
+ #include <GeomAdaptor_Curve.hxx>
+@@ -238,7 +241,13 @@ void ChFi3d_FilBuilder::PerformTwoCorner(const int Index)
+                                true);
+ 
+   bool trouve = false;
+-  if (!Okvisavis)
++  // The fillets face each other, but their traces on the common face may
++  // still miss: the surfdata at the end of one stripe can be a short piece
++  // that stops before the trace of the other one (a convex fillet meeting a
++  // concave one). The neighbouring surfdata are searched as well then.
++  const bool aSeekCrossing = Okvisavis && !OkinterCC;
++  const int  anIsd1Init = Isd1, anIsd2Init = Isd2;
++  if (!Okvisavis || aSeekCrossing)
+   {
+ 
+     // one is not limited to the first or the last surfdata
+@@ -299,10 +308,32 @@ void ChFi3d_FilBuilder::PerformTwoCorner(const int Index)
+                                      Okvisavis,
+                                      Vtx,
+                                      true);
+-        trouve    = Okvisavis;
++        trouve    = aSeekCrossing ? (Okvisavis && OkinterCC) : Okvisavis;
+       }
+     }
+-    if (!trouve)
++    if (!trouve && aSeekCrossing)
++    {
++      // Nothing better: back to the end surfdata as they were.
++      Isd1      = anIsd1Init;
++      Isd2      = anIsd2Init;
++      OkinterCC = ChFi3d_IsInFront(DStr,
++                                   st1,
++                                   st2,
++                                   Isd1,
++                                   Isd2,
++                                   Sens1,
++                                   Sens2,
++                                   UIntPC1,
++                                   UIntPC2,
++                                   FaCo,
++                                   SameSide,
++                                   IFaCo1,
++                                   IFaCo2,
++                                   Okvisavis,
++                                   Vtx,
++                                   true);
++    }
++    else if (!trouve)
+     {
+       PerformMoreThreeCorner(Index, 2);
+       done = true;
+@@ -861,18 +892,36 @@ void ChFi3d_FilBuilder::PerformTwoCorner(const int Index)
+       {
+         throw Standard_Failure("TwoCorner : No point on restriction on surface OnDiff");
+       }
+-      const TopoDS_Edge& Arcopdif = cpopdif.Arc();
+-      const TopoDS_Face& Fopsam   = TopoDS::Face(DStr.Shape(sdsam->Index(ifaopsam)));
+-      TopExp_Explorer    ex;
+-      for (ex.Init(Fopsam, TopAbs_EDGE); ex.More(); ex.Next())
++      const TopoDS_Edge& Arcopdif      = cpopdif.Arc();
++      const TopoDS_Face& Fopsam        = TopoDS::Face(DStr.Shape(sdsam->Index(ifaopsam)));
++      bool               isArcOnFopsam = false;
++      for (TopExp_Explorer ex(Fopsam, TopAbs_EDGE); ex.More() && !isArcOnFopsam; ex.Next())
++      {
++        isArcOnFopsam = ex.Current().IsSame(Arcopdif);
++      }
++      // The arc may bound a face that continues Fopsam smoothly on the same
++      // surface instead (a cylinder split by a smooth edge running up from
++      // the vertex). The piece of the arc between the fillet and the vertex
++      // then becomes a boundary of the extended Fopsam, see below.
++      TopoDS_Face aFopsamTwin;
++      if (!isArcOnFopsam)
+       {
+-        if (ex.Current().IsSame(Arcopdif))
++        TopLoc_Location                 aLocSam;
++        const occ::handle<Geom_Surface> aSurfSam   = BRep_Tool::Surface(Fopsam, aLocSam);
++        bool                            isVtxOnArc = false;
++        for (TopExp_Explorer exv(Arcopdif, TopAbs_VERTEX); exv.More(); exv.Next())
+         {
+-          break;
++          isVtxOnArc = isVtxOnArc || exv.Current().IsSame(Vtx);
+         }
+-        else if (!ex.More())
++        for (NCollection_List<TopoDS_Shape>::Iterator itF(myEFMap(Arcopdif));
++             itF.More() && isVtxOnArc && aFopsamTwin.IsNull();
++             itF.Next())
+         {
+-          throw Standard_Failure("TwoCorner : No common face to loop the contour");
++          TopLoc_Location aLoc;
++          if (BRep_Tool::Surface(TopoDS::Face(itF.Value()), aLoc) == aSurfSam && aLoc == aLocSam)
++          {
++            aFopsamTwin = TopoDS::Face(itF.Value());
++          }
+         }
+       }
+       occ::handle<GeomFill_Boundary> Bsam, Bdif, Bfac;
+@@ -1000,6 +1049,77 @@ void ChFi3d_FilBuilder::PerformTwoCorner(const int Index)
+         ChFi3d_FilCurveInDS(Icf, IFopsam, pcFopsam, OpcFopsam);
+       DStr.ChangeShapeInterferences(IFopsam).Append(interf);
+ 
++      if (!aFopsamTwin.IsNull())
++      {
++        // Close the extended Fopsam with the piece of the arc from the end
++        // of the corner curve to the vertex. The twin face, which keeps the
++        // arc, gets the same piece from its own side.
++        double                        aF, aL;
++        const occ::handle<Geom_Curve> aCArc     = BRep_Tool::Curve(Arcopdif, aF, aL);
++        const double                  aParCP    = cpopdif.ParameterOnArc();
++        const double                  aParV     = BRep_Tool::Parameter(Vtx, Arcopdif);
++        const bool                    isCPFirst = aParCP < aParV;
++        const double                  aP1 = std::min(aParCP, aParV), aP2 = std::max(aParCP, aParV);
++        occ::handle<Geom_Curve>       aPiece = new Geom_TrimmedCurve(aCArc, aP1, aP2);
++        const int                     IVtx   = DStr.AddShape(Vtx);
++        const int                     Ipiece =
++          DStr.AddCurve(TopOpeBRepDS_Curve(aPiece, BRep_Tool::Tolerance(Arcopdif)));
++        DStr.ChangeCurveInterferences(Ipiece).Append(
++          ChFi3d_FilPointInDS(TopAbs_FORWARD, Ipiece, isCPFirst ? If2 : IVtx, aP1, !isCPFirst));
++        DStr.ChangeCurveInterferences(Ipiece).Append(
++          ChFi3d_FilPointInDS(TopAbs_REVERSED, Ipiece, isCPFirst ? IVtx : If2, aP2, isCPFirst));
++
++        // The corner curve ends at the point on the arc; the piece goes on
++        // from there when it starts at that point.
++        const TopAbs_Orientation  anOrPiece = isCPFirst ? OpcFopsam : TopAbs::Reverse(OpcFopsam);
++        TopoDS_Edge               anArcF    = TopoDS::Edge(Arcopdif.Oriented(TopAbs_FORWARD));
++        occ::handle<Geom2d_Curve> aPCsam    = BRep_Tool::CurveOnSurface(anArcF, Fopsam, aF, aL);
++        if (!aPCsam.IsNull())
++        {
++          // Put the pcurve on the side of the period where the corner
++          // curve on Fopsam ends.
++          const gp_Vec2d aShift(aPCsam->Value(aParCP), ppfacdif);
++          if (aShift.Magnitude() > Precision::PConfusion())
++          {
++            aPCsam = occ::down_cast<Geom2d_Curve>(aPCsam->Translated(aShift));
++          }
++          DStr.ChangeShapeInterferences(IFopsam).Append(
++            ChFi3d_FilCurveInDS(Ipiece, IFopsam, aPCsam, anOrPiece));
++        }
++        TopAbs_Orientation anOrTwin = anOrPiece;
++        if (aFopsamTwin.Orientation() == Fopsam.Orientation())
++        {
++          anOrTwin = TopAbs::Reverse(anOrTwin);
++        }
++        const occ::handle<Geom2d_Curve> aPCtwin =
++          BRep_Tool::CurveOnSurface(anArcF, aFopsamTwin, aF, aL);
++        const int ITwin = DStr.AddShape(aFopsamTwin);
++        DStr.ChangeShapeInterferences(ITwin).Append(
++          ChFi3d_FilCurveInDS(Ipiece, ITwin, aPCtwin, anOrTwin));
++
++        // As for an OnSame end in PerformOneCorner, the spine edge of the
++        // OnSame fillet is cut at the vertex; otherwise it stays in the
++        // extended Fopsam.
++        const occ::handle<ChFiDS_Spine>& aSpSam = stsam->Spine();
++        const TopoDS_Edge& anArcSpine           = aSpSam->Edges(isfirstsam ? 1 : aSpSam->NbEdges());
++        TopAbs_Orientation OVtx                 = TopAbs_FORWARD;
++        for (TopExp_Explorer exv(anArcSpine.Oriented(TopAbs_FORWARD), TopAbs_VERTEX); exv.More();
++             exv.Next())
++        {
++          if (Vtx.IsSame(exv.Current()))
++          {
++            OVtx = exv.Current().Orientation();
++            break;
++          }
++        }
++        const int IArcSpine = DStr.AddShape(anArcSpine);
++        DStr.ChangeShapeInterferences(IArcSpine).Append(
++          ChFi3d_FilVertexInDS(TopAbs::Reverse(OVtx),
++                               IArcSpine,
++                               IVtx,
++                               BRep_Tool::Parameter(Vtx, anArcSpine)));
++      }
++
+       regdeb.SetCurve(Icf);
+       regdeb.SetS1(coin->Surf(), false);
+       regdeb.SetS2(IFopsam, true);
+diff --git a/tests/bugs/modalg_8/fillet_thread_convex_concave_corner b/tests/bugs/modalg_8/fillet_thread_convex_concave_corner
+new file mode 100644
+index 000000000..97b429090
+--- /dev/null
++++ b/tests/bugs/modalg_8/fillet_thread_convex_concave_corner
+@@ -0,0 +1,17 @@
++puts "============"
++puts "Modeling Algorithms - Corner of a convex and a concave fillet at the start of a thread"
++puts "(FreeCAD issue 32486)"
++puts "============"
++puts ""
++
++# At the start of the thread the concave edge between its start wall and
++# its flank meets the convex outer rim of the thread. The cylinder above the
++# vertex is two faces on one surface, joined by a smooth edge.
++restore [locate_data_file freecad32486_thread.brep] b
++explode b E
++
++blend result b 1 b_6 1 b_7
++
++checkshape result
++checkmaxtol result -ref 1.06e-4
++checkprops result -v 8681.03 -s 3081.65
+diff --git a/tests/bugs/modalg_8/fillet_thread_end_on_split_cylinder b/tests/bugs/modalg_8/fillet_thread_end_on_split_cylinder
+new file mode 100644
+index 000000000..a446b05c0
+--- /dev/null
++++ b/tests/bugs/modalg_8/fillet_thread_end_on_split_cylinder
+@@ -0,0 +1,18 @@
++puts "============"
++puts "Modeling Algorithms - Fillet ending on a cylinder split by a smooth edge"
++puts "(FreeCAD issue 32486)"
++puts "============"
++puts ""
++
++# The thread starts at the seam plane of the cylinder. Above the start the
++# outer cylinder is two faces on one surface, joined by a smooth edge that
++# runs up from the end of the filleted edge.
++restore [locate_data_file freecad32486_thread.brep] b
++explode b E
++
++# The concave edge between the start wall of the thread and its flank.
++blend result b 1 b_6
++
++checkshape result
++checkmaxtol result -ref 1.e-4
++checkprops result -v 8685.18 -s 3090.36
+-- 
+2.43.0
+

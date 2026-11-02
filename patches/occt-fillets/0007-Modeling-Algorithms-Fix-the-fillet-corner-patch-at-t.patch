@@ -1,0 +1,503 @@
+From 96a7d78596efad1e31eec2a6a6b6a9e701489543 Mon Sep 17 00:00:00 2001
+From: Kuzma30 <kuzemkoa@gmail.com>
+Date: Mon, 26 Oct 2026 10:09:17 +0200
+Subject: [PATCH 07/24] Modeling Algorithms - Fix the fillet corner patch at
+ the vertex of a sharp edge
+
+PerformMoreThreeCorner limits the sharp edges at the corner by a new point
+where the patch meets them. When the patch meets an edge exactly at the
+corner vertex, the edge is cut at its own end. If the other end of the same
+edge is cut by another patch (fillets along both ends of a quarter turn of
+a square on a box, FreeCAD issue 27807), the rebuilt edge keeps its old
+vertex at one end and the face wire is not closed. In this case the edge
+is kept whole and the patch ends at the corner vertex itself, as is done
+already when two fillets meet at the corner.
+
+The patch is a plate with tangency (G1) constraints along the fillets.
+When the fillets meet the faces at the corner at angles that no smooth
+patch can follow, the plate misses the tangency by far anyway (1.2 to 1.5
+rad on the test parts of FreeCAD issues 27807, 31894 and 20085), and the
+constraints only make it wave: it bulged out of the shape by up to 3.5 mm
+on fillets of 0.5 mm and left gaps of 0.1 to 0.6 mm along its boundary.
+If the tangency error of the plate exceeds 0.5 rad, it is built again
+through the curves alone and kept if it is at least as close to them and
+can be approximated; the edges between the patch and the fillets are then
+not marked as smooth. Otherwise the first plate is used as before. The
+constraints are kept in the order they were added, since GeomPlate
+reorders its own list.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
+---
+ .../TKFillet/ChFi3d/ChFi3d_Builder_CnCrn.cxx  | 198 ++++++++++++++----
+ .../GTests/BRepFilletAPI_MakeFillet_Test.cxx  |  75 +++++++
+ 2 files changed, 227 insertions(+), 46 deletions(-)
+
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_CnCrn.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_CnCrn.cxx
+index c02a50d08..922c86340 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_CnCrn.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_CnCrn.cxx
+@@ -85,6 +85,7 @@
+ #include <math_Matrix.hxx>
+ #include <PLib.hxx>
+ #include <Precision.hxx>
++#include <memory>
+ #include <Standard_ConstructionError.hxx>
+ #include <Standard_OutOfRange.hxx>
+ #include <NCollection_HArray1.hxx>
+@@ -1274,6 +1275,9 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
+   NCollection_Array1<bool>                       libre(0, size);
+   NCollection_Array1<bool>                       tangentregul(0, size);
+   NCollection_Array1<bool>                       isG1(0, size);
++  // the patch meets a sharp edge at the corner vertex itself
++  NCollection_Array1<bool> atvertex(0, size);
++  atvertex.Init(false);
+   //  for(int ind=0;ind<=size;ind++){
+   int ind;
+   for (ind = 0; ind <= size; ind++)
+@@ -2704,6 +2708,8 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
+   int                         degree = 3, nbcurvpnt = 10, nbiter = 1;
+   int                         constr = 1; // G1
+   GeomPlate_BuildPlateSurface PSurf(degree, nbcurvpnt, nbiter, tol2d, tolapp3d, angular);
++  // the constraints in the order they are added, which is the order of Curves2d()
++  NCollection_Sequence<occ::handle<GeomPlate_CurveConstraint>> aPlateConts;
+   // calculation of curves on surface for each stripe
+   for (ic = 0; ic < nedge; ic++)
+   {
+@@ -2734,6 +2740,7 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
+       occ::handle<GeomPlate_CurveConstraint> Cont =
+         new GeomPlate_CurveConstraint(HCons, Order.Value(ic), nbcurvpnt, tolapp3d, angular, 0.1);
+       PSurf.Add(Cont);
++      aPlateConts.Append(Cont);
+ 
+       // calculate indexes of points and of the curve for the DS
+       isfirst = (sens.Value(ic) == 1);
+@@ -2887,8 +2894,23 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
+       }
+       if (indpoint.Value(ic, 0) == 0)
+       {
+-        indpoint.SetValue(ic, 0, DStr.AddPoint(TPE));
+-        indpoint.SetValue(ic, 1, indpoint.Value(ic, 0));
++        // The patch may reach the sharp edge at the corner vertex itself. Then
++        // the edge is kept whole and the patch ends at that vertex: a new point
++        // would leave the edge with its old vertex when its other end is also
++        // cut by a patch.
++        if (!deuxconges && !droit && !moresurf.Value(ic) && !moresurf.Value(icmoins)
++            && PE.Distance(BRep_Tool::Pnt(V1)) <= BRep_Tool::Tolerance(V1))
++        {
++          atvertex.SetValue(ic, true);
++          IVtx = DStr.AddShape(V1);
++          indpoint.SetValue(ic, 0, IVtx);
++          indpoint.SetValue(ic, 1, IVtx);
++        }
++        else
++        {
++          indpoint.SetValue(ic, 0, DStr.AddPoint(TPE));
++          indpoint.SetValue(ic, 1, indpoint.Value(ic, 0));
++        }
+       }
+     }
+   }
+@@ -3026,11 +3048,13 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
+             {
+               indpoint.SetValue(icplus, 0, indpoint.Value(ic, 1));
+               indpoint.SetValue(icplus, 1, indpoint.Value(ic, 1));
++              atvertex.SetValue(icplus, atvertex.Value(ic));
+             }
+             if (sharp.Value(ic) && indpoint.Value(ic, 0) == 0)
+             {
+               indpoint.SetValue(ic, 0, indpoint.Value(icmoins, 1));
+               indpoint.SetValue(ic, 1, indpoint.Value(icmoins, 1));
++              atvertex.SetValue(ic, atvertex.Value(icmoins));
+             }
+           }
+         }
+@@ -3152,6 +3176,7 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
+           occ::handle<GeomPlate_CurveConstraint> Cont =
+             new GeomPlate_CurveConstraint(HCons, Order.Value(n3d), 10, tolapp3d, angular, 0.1);
+           PSurf.Add(Cont);
++          aPlateConts.Append(Cont);
+ 
+           // calculation of curve 3d if it is not a projection
+           if (curveint.IsNull())
+@@ -3182,8 +3207,8 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
+             indpoint.SetValue(icplus, 0, DStr.AddPoint(tpoint2));
+             indpoint.SetValue(icplus, 1, indpoint.Value(icplus, 0));
+           }
+-          bool IsVt1 = false;
+-          bool IsVt2 = false;
++          bool IsVt1 = atvertex.Value(ic);
++          bool IsVt2 = atvertex.Value(icplus);
+           if (deuxconges)
+           {
+             IsVt1 = sharp.Value(ic);
+@@ -3323,6 +3348,7 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
+           occ::handle<GeomPlate_CurveConstraint> Cont =
+             new GeomPlate_CurveConstraint(HCons, Order.Value(n3d), 10, tolapp3d, angular, 0.1);
+           PSurf.Add(Cont);
++          aPlateConts.Append(Cont);
+           TopOpeBRepDS_Curve tcurv3d(cproj, error);
+           indcurve3d.SetValue(n3d, DStr.AddCurve(tcurv3d));
+           Interfp1 = ChFi3d_FilPointInDS(TopAbs_FORWARD, indcurve3d.Value(n3d), indpoint1, pardeb);
+@@ -3458,6 +3484,7 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
+         occ::handle<GeomPlate_CurveConstraint> Cont =
+           new GeomPlate_CurveConstraint(HCons, Order.Value(n3d), 10, tolapp3d, angular, 0.1);
+         PSurf.Add(Cont);
++        aPlateConts.Append(Cont);
+         TopOpeBRepDS_Curve tcurv3d(ctrim, 1.e-4);
+         indcurve3d.SetValue(n3d, DStr.AddCurve(tcurv3d));
+         Interfp1 =
+@@ -3472,33 +3499,102 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
+ 
+   PSurf.Perform();
+ 
++  // The tangency constraints may be incompatible, e.g. when the fillets meet
++  // the faces at the corner at angles that no smooth patch can follow. The
++  // plate then misses them by far anyway, and the constraints only make it
++  // wave out of the shape. In this case the plate is also built through the
++  // curves alone, and that one is kept if it can be approximated.
++  const double                                               aMaxG1Error = 0.5;
++  bool                                                       isPlateG0   = false;
++  std::unique_ptr<GeomPlate_BuildPlateSurface>               aPSurfG0;
++  NCollection_Array1<occ::handle<GeomPlate_CurveConstraint>> aConts;
++  NCollection_Array1<int>                                    aSavedOrders;
++  NCollection_Array1<occ::handle<Geom2d_Curve>>              aSaved2d;
++  if (PSurf.IsDone() && PSurf.G1Error() > aMaxG1Error)
++  {
++    const int aNbCurv = aPlateConts.Length();
++    aConts.Resize(1, aNbCurv, false);
++    aSavedOrders.Resize(1, aNbCurv, false);
++    aSaved2d.Resize(1, aNbCurv, false);
++    aPSurfG0 = std::make_unique<GeomPlate_BuildPlateSurface>(degree,
++                                                             nbcurvpnt,
++                                                             nbiter,
++                                                             tol2d,
++                                                             tolapp3d,
++                                                             angular);
++    for (int ip = 1; ip <= aNbCurv; ip++)
++    {
++      aConts(ip)       = aPlateConts(ip);
++      aSavedOrders(ip) = aConts(ip)->Order();
++      aSaved2d(ip)     = aConts(ip)->Curve2dOnSurf();
++      aConts(ip)->SetOrder(0);
++      aConts(ip)->SetCurve2dOnSurf(occ::handle<Geom2d_Curve>());
++      aPSurfG0->Add(aConts(ip));
++    }
++    aPSurfG0->Perform();
++    isPlateG0 = aPSurfG0->IsDone() && aPSurfG0->G0Error() <= std::max(PSurf.G0Error(), tolapp3d);
++  }
++
+   // call of approx
+ 
+-  if (PSurf.IsDone())
++  GeomPlate_BuildPlateSurface* aPlatePtr = isPlateG0 ? aPSurfG0.get() : &PSurf;
++  occ::handle<Geom_Surface>    Surf;
++  double                       aCriterionError = 0., anApproxError = 0.;
++  const int                    nbcarreau = 9;
++  const int                    degmax    = 8;
++  for (int anAttempt = 0; anAttempt < 2 && Surf.IsNull(); anAttempt++)
+   {
+-    int                            nbcarreau = 9;
+-    int                            degmax    = 8;
+-    double                         seuil;
+-    occ::handle<GeomPlate_Surface> gpPlate = PSurf.Surface();
+-
+-    NCollection_Sequence<gp_XY>  S2d;
+-    NCollection_Sequence<gp_XYZ> S3d;
+-    S2d.Clear();
+-    S3d.Clear();
+-    PSurf.Disc2dContour(4, S2d);
+-    PSurf.Disc3dContour(4, 0, S3d);
+-    seuil = std::max(tolapp, 10 * PSurf.G0Error());
++    if (anAttempt == 1)
++    {
++      if (!isPlateG0)
++      {
++        break;
++      }
++      // the plate through the curves alone could not be approximated:
++      // give the constraints back to the first plate
++      isPlateG0 = false;
++      aPlatePtr = &PSurf;
++      for (int ip = aConts.Lower(); ip <= aConts.Upper(); ip++)
++      {
++        aConts(ip)->SetOrder(aSavedOrders(ip));
++        aConts(ip)->SetCurve2dOnSurf(aSaved2d(ip));
++      }
++    }
++    if (!aPlatePtr->IsDone())
++    {
++      continue;
++    }
++    occ::handle<GeomPlate_Surface> gpPlate = aPlatePtr->Surface();
++    NCollection_Sequence<gp_XY>    S2d;
++    NCollection_Sequence<gp_XYZ>   S3d;
++    aPlatePtr->Disc2dContour(4, S2d);
++    aPlatePtr->Disc3dContour(4, 0, S3d);
++    const double               seuil = std::max(tolapp, 10 * aPlatePtr->G0Error());
+     GeomPlate_PlateG0Criterion critere(S2d, S3d, seuil);
+     GeomPlate_MakeApprox       Mapp(gpPlate, critere, tolapp, nbcarreau, degmax);
+-    occ::handle<Geom_Surface>  Surf(Mapp.Surface());
+-    double                     coef = 1.1, apperror;
+-    apperror                        = Mapp.CriterionError() * coef;
++    Surf            = Mapp.Surface();
++    aCriterionError = Mapp.CriterionError();
++    anApproxError   = Mapp.ApproxError();
++  }
++  if (isPlateG0)
++  {
++    for (int ic1 = Order.Lower(); ic1 <= Order.Upper(); ic1++)
++    {
++      Order.SetValue(ic1, 0);
++    }
++  }
++  GeomPlate_BuildPlateSurface& aPlate = *aPlatePtr;
++
++  if (!Surf.IsNull())
++  {
++    double coef = 1.1, apperror;
++    apperror    = aCriterionError * coef;
+ 
+     //  Storage of the surface plate and corresponding curves in the DS
+ 
+     TopAbs_Orientation orplate, orsurfdata, orpcurve, orien;
+ #ifdef OCCT_DEBUG
+-//    double ang1=PSurf.G1Error();
++//    double ang1=aPlate.G1Error();
+ #endif
+     //     gp_Vec n1,n2,du,dv,du1,dv1;
+     //     gp_Pnt pp,pp1;
+@@ -3506,7 +3602,7 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
+     //     gp_Pnt2d uv;
+     //     double scal;
+ 
+-    TopOpeBRepDS_Surface Tsurf(Surf, Mapp.ApproxError());
++    TopOpeBRepDS_Surface Tsurf(Surf, anApproxError);
+     int                  Isurf = DStr.AddSurface(Tsurf);
+     // lbo : historique QDF.
+     if (!myEVIMap.IsBound(V1))
+@@ -3572,9 +3668,9 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
+     // 	 CD.Value(0)->PCurve(isfirst)->LastParameter())/2 ;
+     //     CD.Value(0)->PCurve(isfirst)->D0(tpar,uv);
+     //     surfdata->D1(uv.X(),uv.Y(),pp,du,dv);
+-    //     tpar=(PSurf.Curves2d()->Value(1)->FirstParameter()+
+-    // 	  PSurf.Curves2d()->Value(1)->LastParameter())/2;
+-    //     (PSurf.Curves2d())->Value(1)->D0(tpar,uv);
++    //     tpar=(aPlate.Curves2d()->Value(1)->FirstParameter()+
++    // 	  aPlate.Curves2d()->Value(1)->LastParameter())/2;
++    //     (aPlate.Curves2d())->Value(1)->D0(tpar,uv);
+     //     Surf-> D1(uv.X(),uv.Y(),pp1,du1,dv1);
+     //     n1=du.Crossed(dv);
+     //     n2=du1.Crossed(dv1);
+@@ -3582,7 +3678,7 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
+     orsurfdata = Fd->Orientation();
+     //     if (scal>0) orplate=orsurfdata;
+     //     else  orplate=TopAbs::Reverse(orsurfdata);
+-    orplate = PlateOrientation(Surf, PSurf.Curves2d(), SumFaceNormalAtV1);
++    orplate = PlateOrientation(Surf, aPlate.Curves2d(), SumFaceNormalAtV1);
+ 
+     //  creation of solidinterderence for Plate
+     occ::handle<TopOpeBRepDS_SolidSurfaceInterference> SSI =
+@@ -3660,8 +3756,8 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
+           double                    par2 = p.Value(icplus, ic);
+           BCurv1.D0(par1, ptic);
+           BCurv2.D0(par2, pticplus);
+-          ParametrePlate(n3d, PSurf, Surf, ptic, apperror, UV1);
+-          ParametrePlate(n3d, PSurf, Surf, pticplus, apperror, UV2);
++          ParametrePlate(n3d, aPlate, Surf, ptic, apperror, UV1);
++          ParametrePlate(n3d, aPlate, Surf, pticplus, apperror, UV2);
+           double             to3d = 1.e-3, to2d = 1.e-6, tolreached;
+           ChFiDS_CommonPoint CP1, CP2;
+           CP1.SetArc(1.e-3, TopoDS::Edge(Evive.Value(ic)), par1, TopAbs_FORWARD);
+@@ -3687,8 +3783,9 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
+           ind1        = indpoint(ic, 0);
+           ind2        = indpoint(icplus, 0);
+           int indcurv = DStr.AddCurve(tcurv3d);
+-          Interfp1    = ChFi3d_FilPointInDS(TopAbs_FORWARD, indcurv, ind1, param1);
+-          Interfp2    = ChFi3d_FilPointInDS(TopAbs_REVERSED, indcurv, ind2, param2);
++          Interfp1 = ChFi3d_FilPointInDS(TopAbs_FORWARD, indcurv, ind1, param1, atvertex.Value(ic));
++          Interfp2 =
++            ChFi3d_FilPointInDS(TopAbs_REVERSED, indcurv, ind2, param2, atvertex.Value(icplus));
+           DStr.ChangeCurveInterferences(indcurv).Append(Interfp1);
+           DStr.ChangeCurveInterferences(indcurv).Append(Interfp2);
+           Interfc = ChFi3d_FilCurveInDS(indcurv, Isurf, C2d, orien);
+@@ -3709,7 +3806,7 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
+         isfirst = (sens.Value(ic) == 1);
+         //   calculate curves interference relative to stripes
+ 
+-        apperror = Mapp.CriterionError() * coef;
++        apperror = aCriterionError * coef;
+         pardeb   = CD.Value(ic)->PCurve(isfirst)->FirstParameter();
+         parfin   = CD.Value(ic)->PCurve(isfirst)->LastParameter();
+ 
+@@ -3731,13 +3828,16 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
+ 
+         // calculate surfaceinterference
+         Interfc =
+-          ChFi3d_FilCurveInDS(indcurve3d.Value(n3d), Isurf, PSurf.Curves2d()->Value(n3d), orien);
++          ChFi3d_FilCurveInDS(indcurve3d.Value(n3d), Isurf, aPlate.Curves2d()->Value(n3d), orien);
+         DStr.ChangeSurfaceInterferences(Isurf).Append(Interfc);
+-        regular.SetCurve(indcurve3d.Value(n3d));
+-        regular.SetS1(Isurf, false);
+-        indice = CD.Value(ic)->SetOfSurfData()->Value(i.Value(ic, icmoins))->Surf();
+-        regular.SetS2(indice, false);
+-        myRegul.Append(regular);
++        if (!isPlateG0)
++        {
++          regular.SetCurve(indcurve3d.Value(n3d));
++          regular.SetS1(Isurf, false);
++          indice = CD.Value(ic)->SetOfSurfData()->Value(i.Value(ic, icmoins))->Surf();
++          regular.SetS2(indice, false);
++          myRegul.Append(regular);
++        }
+       }
+     }
+ 
+@@ -3748,7 +3848,7 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
+       Indices(nedge, ic, icplus, icmoins);
+       if (!oksea.Value(ic))
+       {
+-        if (sharp.Value(ic) && !deuxconges)
++        if (sharp.Value(ic) && !deuxconges && !atvertex.Value(ic))
+         {
+           // limitation of the alive edge
+           TopAbs_Orientation ori;
+@@ -3781,14 +3881,20 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
+             tcourb1.Tolerance(tcourb1.Tolerance() + apperror);
+             if (!deuxconges)
+             {
+-              TopOpeBRepDS_Point& tpt11 = DStr.ChangePoint(indpoint(ic, 1));
+-              TopOpeBRepDS_Point& tpt21 = DStr.ChangePoint(indpoint(icplus, 0));
+-              tpt11.Tolerance(tpt11.Tolerance() + apperror);
+-              tpt21.Tolerance(tpt21.Tolerance() + apperror);
++              if (!atvertex.Value(ic))
++              {
++                TopOpeBRepDS_Point& tpt11 = DStr.ChangePoint(indpoint(ic, 1));
++                tpt11.Tolerance(tpt11.Tolerance() + apperror);
++              }
++              if (!atvertex.Value(icplus))
++              {
++                TopOpeBRepDS_Point& tpt21 = DStr.ChangePoint(indpoint(icplus, 0));
++                tpt21.Tolerance(tpt21.Tolerance() + apperror);
++              }
+             }
+             Interfc = ChFi3d_FilCurveInDS(indcurve3d.Value(n3d),
+                                           Isurf,
+-                                          PSurf.Curves2d()->Value(n3d),
++                                          aPlate.Curves2d()->Value(n3d),
+                                           orien);
+             DStr.ChangeSurfaceInterferences(Isurf).Append(Interfc);
+             if (Order.Value(n3d) == 1)
+@@ -3823,7 +3929,7 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
+             }
+             Interfc = ChFi3d_FilCurveInDS(indcurve3d.Value(n3d),
+                                           Isurf,
+-                                          PSurf.Curves2d()->Value(n3d),
++                                          aPlate.Curves2d()->Value(n3d),
+                                           orien);
+             DStr.ChangeSurfaceInterferences(Isurf).Append(Interfc);
+             if (Order.Value(n3d) == 1)
+@@ -3852,7 +3958,7 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
+           TopOpeBRepDS_Curve& tcourb1 = DStr.ChangeCurve(indcurve3d.Value(n3d));
+           tcourb1.Tolerance(tcourb1.Tolerance() + apperror);
+           Interfc =
+-            ChFi3d_FilCurveInDS(indcurve3d.Value(n3d), Isurf, PSurf.Curves2d()->Value(n3d), orien);
++            ChFi3d_FilCurveInDS(indcurve3d.Value(n3d), Isurf, aPlate.Curves2d()->Value(n3d), orien);
+           DStr.ChangeSurfaceInterferences(Isurf).Append(Interfc);
+         }
+       }
+@@ -3867,7 +3973,7 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
+       Indices(nedge, ic, icplus, icmoins);
+       if (!oksea.Value(ic))
+       {
+-        if (sharp.Value(ic) && !deuxconges)
++        if (sharp.Value(ic) && !deuxconges && !atvertex.Value(ic))
+         {
+           // limitation of the alive edge
+           TopAbs_Orientation ori;
+diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+index ebf0ae62d..b91ca96f2 100644
+--- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
++++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+@@ -1068,3 +1068,78 @@ TEST(BRepFilletAPI_MakeFilletTest, PastShrinkingSupportFace_KeepsAddedVolume)
+     EXPECT_LT(anAdded, 2700.0);
+   }
+ }
++
++// The same fillet on all three edges: the edge between the two corner patches
++// at y = 50 is bounded by both of them, at its own vertices.
++TEST(BRepFilletAPI_MakeFilletTest, PastShrinkingSupportFaceOnAllEdges_ProducesValidShape)
++{
++  const TopoDS_Shape                  aShape  = MakeQuarterRevolveOnBox();
++  const NCollection_List<TopoDS_Edge> anEdges = RevolveFootEdges(aShape, true);
++  ASSERT_EQ(anEdges.Extent(), 3);
++
++  BRepFilletAPI_MakeFillet aFillet(aShape);
++  for (const TopoDS_Edge& anEdge : anEdges)
++  {
++    aFillet.Add(15.0, anEdge);
++  }
++  aFillet.Build();
++  ASSERT_TRUE(aFillet.IsDone());
++  EXPECT_TRUE(BRepCheck_Analyzer(aFillet.Shape()).IsValid());
++  EXPECT_LT(MaxVertexTolerance(aFillet.Shape()), 5.0);
++}
++
++//=================================================================================================
++// Corner patch whose tangency constraints cannot be met
++
++// A square hole exactly as wide as the flat top of a box with rounded edges:
++// the rim of the hole runs along the tangent lines of the rounded edges. The
++// corner patches of the rim fillet cannot be tangent to the fillets around
++// them; with the tangency constraints the plate waved far out of the corner
++// and the volume taken by the fillet was 527 mm3 instead of a few tens.
++TEST(BRepFilletAPI_MakeFilletTest, SquareHoleFlushWithRoundedEdges_KeepsCornersLocal)
++{
++  const TopoDS_Shape       aBox = BRepPrimAPI_MakeBox(20.0, 20.0, 20.0).Shape();
++  BRepFilletAPI_MakeFillet aRound(aBox);
++  for (TopExp_Explorer anExp(aBox, TopAbs_EDGE); anExp.More(); anExp.Next())
++  {
++    aRound.Add(3.0, TopoDS::Edge(anExp.Current()));
++  }
++  aRound.Build();
++  ASSERT_TRUE(aRound.IsDone());
++
++  const TopoDS_Shape aTool = BRepPrimAPI_MakeBox(gp_Pnt(3.0, 3.0, 12.0), 14.0, 14.0, 10.0).Shape();
++  BRepAlgoAPI_Cut    aCut(aRound.Shape(), aTool);
++  ASSERT_TRUE(aCut.IsDone());
++  const TopoDS_Shape& aHoled = aCut.Shape();
++
++  BRepFilletAPI_MakeFillet                                      aFillet(aHoled);
++  NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> anEdges;
++  TopExp::MapShapes(aHoled, TopAbs_EDGE, anEdges);
++  for (int i = 1; i <= anEdges.Extent(); ++i)
++  {
++    const TopoDS_Edge& anEdge = TopoDS::Edge(anEdges(i));
++    GProp_GProps       aProps;
++    BRepGProp::LinearProperties(anEdge, aProps);
++    const gp_Pnt aMid = aProps.CentreOfMass();
++    if (std::abs(aMid.Z() - 20.0) < 1.e-6
++        && (std::abs(aMid.X() - 3.0) < 1.e-6 || std::abs(aMid.X() - 17.0) < 1.e-6
++            || std::abs(aMid.Y() - 3.0) < 1.e-6 || std::abs(aMid.Y() - 17.0) < 1.e-6))
++    {
++      aFillet.Add(1.0, anEdge);
++    }
++  }
++  ASSERT_EQ(aFillet.NbContours(), 4);
++
++  aFillet.Build();
++  ASSERT_TRUE(aFillet.IsDone());
++  EXPECT_TRUE(BRepCheck_Analyzer(aFillet.Shape()).IsValid());
++
++  // A fillet of 1 mm along a rim of 56 mm takes about (1 - pi/4) * 56 = 12 mm3,
++  // plus the corners.
++  GProp_GProps aBefore, anAfter;
++  BRepGProp::VolumeProperties(aHoled, aBefore);
++  BRepGProp::VolumeProperties(aFillet.Shape(), anAfter);
++  const double aRemoved = aBefore.Mass() - anAfter.Mass();
++  EXPECT_GT(aRemoved, 5.0);
++  EXPECT_LT(aRemoved, 60.0);
++}
+-- 
+2.43.0
+

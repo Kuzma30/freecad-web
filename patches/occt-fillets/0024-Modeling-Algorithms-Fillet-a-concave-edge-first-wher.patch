@@ -1,0 +1,1033 @@
+From 16cc926548b2740d031733a1e92325112ca10fba Mon Sep 17 00:00:00 2001
+From: Kuzma30 <kuzemkoa@gmail.com>
+Date: Wed, 28 Oct 2026 15:28:35 +0200
+Subject: [PATCH 24/24] Modeling Algorithms - Fillet a concave edge first where
+ it meets two convex fillets
+
+FreeCAD issue 20085 (cube 20 with fillets of radius 6 and a square hole 8 x 8
+whose walls run along the tangent lines of the fillets): a vertical (concave)
+edge of the hole and the two upper (convex) edges at its end, filleted
+together (Edge26 + Edge13 + Edge35), met at a vertex which also has smooth
+edges (between the fillets and the sphere of the cube). The corner of the three
+fillets was a plate patch with tolerance 0.0068 (r = 0.5) to 0.21 (r = 2.5).
+Filleting the vertical edge first and the upper edges then gives a corner
+without patch: the upper fillets go round the end of the vertical one, with
+tolerance 2.4e-4 at most.
+
+BRepFilletAPI_MakeFillet::Build now does so when a concave contour ends at a
+vertex where two convex contours end too and the vertex has more edges than
+contour ends: the concave contours ending at such vertices are filleted first,
+then the other contours on the result, the edges of the input being replaced by
+their images in the intermediate shape (the edges of the result shared by the
+images of the faces of the edge and lying on it). The fillets of the second
+stage propagate round the ends of the first ones, so this is done only if, at
+each end of a first-stage contour, the other sharp edges are all filleted or
+none; otherwise, or if a stage fails, the contours are computed together as
+before. Only contours of constant radius are handled; the parameters given to
+SetParams and SetContinuity are passed on to the stages.
+
+The history (Generated, Modified, IsDeleted) of a result computed in two
+stages is the merge of the histories of the stages (BRepTools_History): the
+edges of the second stage modified from the edges of the input, and the new
+edges of the faces of the first stage generated from its contours, so that the
+faces of the second stage built on them are related to the input.
+
+The cap closing a fillet in the plane of a section or in the tangent plane at
+its end (CapInSectionPlane) is recorded as generated from the vertex, like the
+other corners.
+
+Tests: the DRAW test fillet_rounded_cube_square_hole_three_fillets_corner
+(r = 0.5 to 2.5, compared with the fillets made in two steps) and the GTest
+SquareHoleInRoundedCube_ThreeFilletsCornerAsInTwoSteps (also checking that
+every face of the result is related to the input by the history). The
+expected results of fillet_rounded_cube_all_edges_symmetric (all edges: the
+four corners of the hole), fillet_rounded_cube_square_hole_concave_edge,
+fillet_rounded_cube_square_hole_rim_after_corner and of the corresponding
+GTests are updated: the tolerances go down to about 1e-4 and the volumes are
+those of the fillets made in two steps.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
+---
+ .../BRepFilletAPI_MakeFillet.cxx              | 511 +++++++++++++++++-
+ .../BRepFilletAPI_MakeFillet.hxx              |  27 +
+ .../TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx     |   5 +
+ .../GTests/BRepFilletAPI_MakeFillet_Test.cxx  | 162 +++++-
+ .../fillet_rounded_cube_all_edges_symmetric   |  14 +-
+ ...llet_rounded_cube_square_hole_concave_edge |   7 +-
+ ..._rounded_cube_square_hole_rim_after_corner |   5 +-
+ ...nded_cube_square_hole_three_fillets_corner |  41 ++
+ 8 files changed, 752 insertions(+), 20 deletions(-)
+ create mode 100644 tests/bugs/modalg_8/fillet_rounded_cube_square_hole_three_fillets_corner
+
+diff --git a/src/ModelingAlgorithms/TKFillet/BRepFilletAPI/BRepFilletAPI_MakeFillet.cxx b/src/ModelingAlgorithms/TKFillet/BRepFilletAPI/BRepFilletAPI_MakeFillet.cxx
+index f192eb5fa..335bfb09b 100644
+--- a/src/ModelingAlgorithms/TKFillet/BRepFilletAPI/BRepFilletAPI_MakeFillet.cxx
++++ b/src/ModelingAlgorithms/TKFillet/BRepFilletAPI/BRepFilletAPI_MakeFillet.cxx
+@@ -15,6 +15,16 @@
+ // commercial license or contractual agreement.
+ 
+ #include <BRepFilletAPI_MakeFillet.hxx>
++#include <BRep_Tool.hxx>
++#include <BRepAdaptor_Curve.hxx>
++#include <ChFi3d.hxx>
++#include <Extrema_ExtPC.hxx>
++#include <NCollection_DataMap.hxx>
++#include <NCollection_IndexedDataMap.hxx>
++#include <NCollection_IndexedMap.hxx>
++#include <Standard_Failure.hxx>
++#include <TopExp.hxx>
++#include <TopoDS.hxx>
+ #include <ChFiDS_ErrorStatus.hxx>
+ #include <ChFiDS_Spine.hxx>
+ #include <Geom_Surface.hxx>
+@@ -31,7 +41,13 @@
+ 
+ BRepFilletAPI_MakeFillet::BRepFilletAPI_MakeFillet(const TopoDS_Shape&      S,
+                                                    const ChFi3d_FilletShape FShape)
+-    : myBuilder(S, FShape)
++    : myBuilder(S, FShape),
++      myInitialShape(S),
++      myParams{0.0, 0.0, 0.0, 0.0, 0.0, 0.0},
++      myHasParams(false),
++      myInternalContinuity(GeomAbs_C1),
++      myAngularTolerance(0.0),
++      myHasContinuity(false)
+ {
+ }
+ 
+@@ -45,6 +61,13 @@ void BRepFilletAPI_MakeFillet::SetParams(const double Tang,
+                                          const double Fleche)
+ {
+   myBuilder.SetParams(Tang, Tesp, T2d, TApp3d, TolApp2d, Fleche);
++  myParams[0] = Tang;
++  myParams[1] = Tesp;
++  myParams[2] = T2d;
++  myParams[3] = TApp3d;
++  myParams[4] = TolApp2d;
++  myParams[5] = Fleche;
++  myHasParams = true;
+ }
+ 
+ //=================================================================================================
+@@ -53,6 +76,9 @@ void BRepFilletAPI_MakeFillet::SetContinuity(const GeomAbs_Shape InternalContinu
+                                              const double        AngleTol)
+ {
+   myBuilder.SetContinuity(InternalContinuity, AngleTol);
++  myInternalContinuity = InternalContinuity;
++  myAngularTolerance   = AngleTol;
++  myHasContinuity      = true;
+ }
+ 
+ //=================================================================================================
+@@ -368,8 +394,478 @@ occ::handle<TopOpeBRepBuild_HBuilder> BRepFilletAPI_MakeFillet::Builder() const
+ 
+ //=================================================================================================
+ 
++namespace
++{
++using ShapeListMap =
++  NCollection_IndexedDataMap<TopoDS_Shape, NCollection_List<TopoDS_Shape>, TopTools_ShapeMapHasher>;
++using ShapeMap = NCollection_Map<TopoDS_Shape, TopTools_ShapeMapHasher>;
++
++//! Returns the concavity of the angle of the two faces of an edge.
++//! @param[in] theEdge      edge of the shape
++//! @param[in] theEdgeFaces faces of the edges of the shape
++//! @return ChFiDS_Other if the edge does not bound two distinct faces
++ChFiDS_TypeOfConcavity edgeConcavity(const TopoDS_Edge& theEdge, const ShapeListMap& theEdgeFaces)
++{
++  const NCollection_List<TopoDS_Shape>* aFaces = theEdgeFaces.Seek(theEdge);
++  if (aFaces == nullptr || aFaces->Extent() != 2)
++  {
++    return ChFiDS_Other;
++  }
++  const TopoDS_Face& aFace1 = TopoDS::Face(aFaces->First());
++  const TopoDS_Face& aFace2 = TopoDS::Face(aFaces->Last());
++  if (aFace1.IsSame(aFace2))
++  {
++    return ChFiDS_Other;
++  }
++  return ChFi3d::DefineConnectType(theEdge, aFace1, aFace2, 1.e-5, true);
++}
++
++//=================================================================================================
++
++//! Returns the faces replacing a face of the input of a stage in its result.
++//! @param[in] theFace  face of the input of the stage
++//! @param[in] theStage computed stage
++//! @param[out] theImages faces of the result; empty if the face is deleted
++void faceImages(const TopoDS_Shape&             theFace,
++                BRepFilletAPI_MakeFillet&       theStage,
++                NCollection_List<TopoDS_Shape>& theImages)
++{
++  theImages.Clear();
++  if (theStage.IsDeleted(theFace))
++  {
++    return;
++  }
++  const NCollection_List<TopoDS_Shape>& aModified = theStage.Modified(theFace);
++  if (aModified.IsEmpty())
++  {
++    theImages.Append(theFace);
++    return;
++  }
++  for (NCollection_List<TopoDS_Shape>::Iterator anIt(aModified); anIt.More(); anIt.Next())
++  {
++    theImages.Append(anIt.Value());
++  }
++}
++
++//=================================================================================================
++
++//! Returns the edges replacing an edge of the input of a stage in its result:
++//! the edges of the result shared by the images of the two faces of the edge
++//! and lying on it.
++//! @param[in] theEdge        edge of the input of the stage
++//! @param[in] theEdgeFaces   faces of the edges of the input
++//! @param[in] theStage       computed stage
++//! @param[in] theResultEdges faces of the edges of the result of the stage
++//! @param[out] theImages     edges of the result
++void edgeImages(const TopoDS_Edge&              theEdge,
++                const ShapeListMap&             theEdgeFaces,
++                BRepFilletAPI_MakeFillet&       theStage,
++                const ShapeListMap&             theResultEdges,
++                NCollection_List<TopoDS_Shape>& theImages)
++{
++  theImages.Clear();
++  if (theResultEdges.Contains(theEdge))
++  {
++    theImages.Append(theEdge);
++    return;
++  }
++  const NCollection_List<TopoDS_Shape>* aFaces = theEdgeFaces.Seek(theEdge);
++  if (aFaces == nullptr || aFaces->Extent() != 2)
++  {
++    return;
++  }
++  NCollection_List<TopoDS_Shape> anImages1, anImages2;
++  faceImages(aFaces->First(), theStage, anImages1);
++  faceImages(aFaces->Last(), theStage, anImages2);
++  ShapeMap anImageMap1, anImageMap2;
++  for (NCollection_List<TopoDS_Shape>::Iterator anIt(anImages1); anIt.More(); anIt.Next())
++  {
++    anImageMap1.Add(anIt.Value());
++  }
++  for (NCollection_List<TopoDS_Shape>::Iterator anIt(anImages2); anIt.More(); anIt.Next())
++  {
++    anImageMap2.Add(anIt.Value());
++  }
++  const BRepAdaptor_Curve anEdgeCurve(theEdge);
++  ShapeMap                aCandidates;
++  for (NCollection_List<TopoDS_Shape>::Iterator anIt(anImages1); anIt.More(); anIt.Next())
++  {
++    for (TopExp_Explorer anExp(anIt.Value(), TopAbs_EDGE); anExp.More(); anExp.Next())
++    {
++      const TopoDS_Edge& aCandidate = TopoDS::Edge(anExp.Current());
++      if (BRep_Tool::Degenerated(aCandidate) || !aCandidates.Add(aCandidate))
++      {
++        continue;
++      }
++      const NCollection_List<TopoDS_Shape>* aCandidateFaces = theResultEdges.Seek(aCandidate);
++      if (aCandidateFaces == nullptr || aCandidateFaces->Extent() != 2)
++      {
++        continue;
++      }
++      const TopoDS_Shape& aFace1 = aCandidateFaces->First();
++      const TopoDS_Shape& aFace2 = aCandidateFaces->Last();
++      if (!(anImageMap1.Contains(aFace1) && anImageMap2.Contains(aFace2))
++          && !(anImageMap1.Contains(aFace2) && anImageMap2.Contains(aFace1)))
++      {
++        continue;
++      }
++      const BRepAdaptor_Curve aCurve(aCandidate);
++      const gp_Pnt aMid = aCurve.Value(0.5 * (aCurve.FirstParameter() + aCurve.LastParameter()));
++      const Extrema_ExtPC anExt(aMid, anEdgeCurve);
++      if (!anExt.IsDone() || anExt.NbExt() == 0)
++      {
++        continue;
++      }
++      double aMinSqDist = anExt.SquareDistance(1);
++      for (int i = 2; i <= anExt.NbExt(); ++i)
++      {
++        aMinSqDist = std::min(aMinSqDist, anExt.SquareDistance(i));
++      }
++      const double aTol =
++        BRep_Tool::Tolerance(theEdge) + BRep_Tool::Tolerance(aCandidate) + Precision::Confusion();
++      if (aMinSqDist <= aTol * aTol)
++      {
++        theImages.Append(aCandidate);
++      }
++    }
++  }
++}
++
++//=================================================================================================
++
++//! Records the history of a stage: the faces modified or deleted and the
++//! shapes generated from the edges and vertices of its input.
++//! @param[in] theInput      input shape of the stage
++//! @param[in] theStage      computed stage
++//! @param[in] theWithEdges  when true, the new edges of the generated faces
++//!                          are recorded as generated as well, so that what
++//!                          a later stage builds on them is related to the
++//!                          input
++//! @param[in,out] theHistory history to fill
++void addStageHistory(const TopoDS_Shape&       theInput,
++                     BRepFilletAPI_MakeFillet& theStage,
++                     const bool                theWithEdges,
++                     BRepTools_History&        theHistory)
++{
++  NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> anInputEdges, aShapes;
++  TopExp::MapShapes(theInput, TopAbs_EDGE, anInputEdges);
++  TopExp::MapShapes(theInput, TopAbs_VERTEX, aShapes);
++  TopExp::MapShapes(theInput, TopAbs_EDGE, aShapes);
++  for (int i = 1; i <= aShapes.Extent(); ++i)
++  {
++    const TopoDS_Shape&                  aShape = aShapes(i);
++    const NCollection_List<TopoDS_Shape> aGenerated(theStage.Generated(aShape));
++    ShapeMap                             aGeneratedEdges;
++    for (NCollection_List<TopoDS_Shape>::Iterator anIt(aGenerated); anIt.More(); anIt.Next())
++    {
++      theHistory.AddGenerated(aShape, anIt.Value());
++      if (!theWithEdges)
++      {
++        continue;
++      }
++      for (TopExp_Explorer anExp(anIt.Value(), TopAbs_EDGE); anExp.More(); anExp.Next())
++      {
++        const TopoDS_Shape& anEdge = anExp.Current();
++        if (!anInputEdges.Contains(anEdge) && aGeneratedEdges.Add(anEdge))
++        {
++          theHistory.AddGenerated(aShape, anEdge);
++        }
++      }
++    }
++  }
++  NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> aFaces;
++  TopExp::MapShapes(theInput, TopAbs_FACE, aFaces);
++  for (int i = 1; i <= aFaces.Extent(); ++i)
++  {
++    const TopoDS_Shape& aFace = aFaces(i);
++    if (theStage.IsDeleted(aFace))
++    {
++      theHistory.Remove(aFace);
++      continue;
++    }
++    const NCollection_List<TopoDS_Shape> aModified(theStage.Modified(aFace));
++    for (NCollection_List<TopoDS_Shape>::Iterator anIt(aModified); anIt.More(); anIt.Next())
++    {
++      if (!anIt.Value().IsSame(aFace))
++      {
++        theHistory.AddModified(aFace, anIt.Value());
++      }
++    }
++  }
++}
++} // namespace
++
++//=================================================================================================
++
++bool BRepFilletAPI_MakeFillet::buildConcaveFirst()
++{
++  const int aNbContours = NbContours();
++  if (aNbContours < 3)
++  {
++    return false;
++  }
++  for (int anIC = 1; anIC <= aNbContours; ++anIC)
++  {
++    if (!myBuilder.IsConstant(anIC))
++    {
++      return false;
++    }
++  }
++
++  ShapeListMap anEdgeFaces, aVertexEdges;
++  TopExp::MapShapesAndAncestors(myInitialShape, TopAbs_EDGE, TopAbs_FACE, anEdgeFaces);
++  TopExp::MapShapesAndAncestors(myInitialShape, TopAbs_VERTEX, TopAbs_EDGE, aVertexEdges);
++
++  // Ends of the contours at each vertex: the index of the contour, negated
++  // for a convex one.
++  NCollection_DataMap<TopoDS_Shape, NCollection_List<int>, TopTools_ShapeMapHasher> anEnds;
++  for (int anIC = 1; anIC <= aNbContours; ++anIC)
++  {
++    if (Closed(anIC))
++    {
++      continue;
++    }
++    for (int anEnd = 0; anEnd < 2; ++anEnd)
++    {
++      const TopoDS_Vertex          aVertex = anEnd == 0 ? FirstVertex(anIC) : LastVertex(anIC);
++      const TopoDS_Edge&           anEdge  = Edge(anIC, anEnd == 0 ? 1 : NbEdges(anIC));
++      const ChFiDS_TypeOfConcavity aType   = edgeConcavity(anEdge, anEdgeFaces);
++      if (aType != ChFiDS_Concave && aType != ChFiDS_Convex)
++      {
++        continue;
++      }
++      if (!anEnds.IsBound(aVertex))
++      {
++        anEnds.Bind(aVertex, NCollection_List<int>());
++      }
++      anEnds.ChangeFind(aVertex).Append(aType == ChFiDS_Concave ? anIC : -anIC);
++    }
++  }
++
++  // The first stage: the concave contours ending at a vertex with two convex
++  // contours, the vertex having more edges than contour ends.
++  NCollection_Map<int> aFirstStage;
++  for (NCollection_DataMap<TopoDS_Shape, NCollection_List<int>, TopTools_ShapeMapHasher>::Iterator
++         anIt(anEnds);
++       anIt.More();
++       anIt.Next())
++  {
++    int aNbConcave = 0, aNbConvex = 0;
++    for (NCollection_List<int>::Iterator anEndIt(anIt.Value()); anEndIt.More(); anEndIt.Next())
++    {
++      if (anEndIt.Value() > 0)
++      {
++        ++aNbConcave;
++      }
++      else
++      {
++        ++aNbConvex;
++      }
++    }
++    if (aNbConcave == 0 || aNbConvex < 2)
++    {
++      continue;
++    }
++    ShapeMap anEdges;
++    if (const NCollection_List<TopoDS_Shape>* aList = aVertexEdges.Seek(anIt.Key()))
++    {
++      for (NCollection_List<TopoDS_Shape>::Iterator anEdgeIt(*aList); anEdgeIt.More();
++           anEdgeIt.Next())
++      {
++        if (!BRep_Tool::Degenerated(TopoDS::Edge(anEdgeIt.Value())))
++        {
++          anEdges.Add(anEdgeIt.Value());
++        }
++      }
++    }
++    if (anEdges.Extent() <= aNbConcave + aNbConvex)
++    {
++      continue;
++    }
++    for (NCollection_List<int>::Iterator anEndIt(anIt.Value()); anEndIt.More(); anEndIt.Next())
++    {
++      if (anEndIt.Value() > 0)
++      {
++        aFirstStage.Add(anEndIt.Value());
++      }
++    }
++  }
++  if (aFirstStage.IsEmpty() || aFirstStage.Extent() == aNbContours)
++  {
++    return false;
++  }
++
++  // The fillets of the second stage propagate round the ends of the fillets
++  // of the first stage. Not to fillet edges which are not asked for, at each
++  // end of a contour of the first stage the other sharp edges must be either
++  // all filleted or none.
++  for (NCollection_Map<int>::Iterator anIt(aFirstStage); anIt.More(); anIt.Next())
++  {
++    const int anIC = anIt.Value();
++    for (int anEnd = 0; anEnd < 2; ++anEnd)
++    {
++      const TopoDS_Vertex aVertex = anEnd == 0 ? FirstVertex(anIC) : LastVertex(anIC);
++      const NCollection_List<TopoDS_Shape>* anEdges = aVertexEdges.Seek(aVertex);
++      if (anEdges == nullptr)
++      {
++        continue;
++      }
++      int aNbFilleted = 0, aNbFree = 0;
++      for (NCollection_List<TopoDS_Shape>::Iterator anEdgeIt(*anEdges); anEdgeIt.More();
++           anEdgeIt.Next())
++      {
++        const TopoDS_Edge& anEdge = TopoDS::Edge(anEdgeIt.Value());
++        const int          anIC2  = Contour(anEdge);
++        if (anIC2 != 0 && aFirstStage.Contains(anIC2))
++        {
++          continue;
++        }
++        const ChFiDS_TypeOfConcavity aType = edgeConcavity(anEdge, anEdgeFaces);
++        if (aType != ChFiDS_Concave && aType != ChFiDS_Convex)
++        {
++          continue;
++        }
++        if (anIC2 != 0)
++        {
++          ++aNbFilleted;
++        }
++        else
++        {
++          ++aNbFree;
++        }
++      }
++      if (aNbFilleted != 0 && aNbFree != 0)
++      {
++        return false;
++      }
++    }
++  }
++
++  const ChFi3d_FilletShape aFilletShape = GetFilletShape();
++  BRepFilletAPI_MakeFillet aStage1(myInitialShape, aFilletShape);
++  if (myHasParams)
++  {
++    aStage1.SetParams(myParams[0], myParams[1], myParams[2], myParams[3], myParams[4], myParams[5]);
++  }
++  if (myHasContinuity)
++  {
++    aStage1.SetContinuity(myInternalContinuity, myAngularTolerance);
++  }
++  for (NCollection_Map<int>::Iterator anIt(aFirstStage); anIt.More(); anIt.Next())
++  {
++    const int anIC = anIt.Value();
++    for (int anIE = 1; anIE <= NbEdges(anIC); ++anIE)
++    {
++      aStage1.Add(Radius(anIC), Edge(anIC, anIE));
++    }
++  }
++  try
++  {
++    aStage1.Build();
++  }
++  catch (Standard_Failure const&)
++  {
++    return false;
++  }
++  if (!aStage1.IsDone())
++  {
++    return false;
++  }
++
++  const TopoDS_Shape aShape1 = aStage1.Shape();
++  ShapeListMap       aShape1EdgeFaces;
++  TopExp::MapShapesAndAncestors(aShape1, TopAbs_EDGE, TopAbs_FACE, aShape1EdgeFaces);
++
++  occ::handle<BRepTools_History> aHistory = new BRepTools_History();
++  addStageHistory(myInitialShape, aStage1, true, *aHistory);
++
++  BRepFilletAPI_MakeFillet aStage2(aShape1, aFilletShape);
++  if (myHasParams)
++  {
++    aStage2.SetParams(myParams[0], myParams[1], myParams[2], myParams[3], myParams[4], myParams[5]);
++  }
++  if (myHasContinuity)
++  {
++    aStage2.SetContinuity(myInternalContinuity, myAngularTolerance);
++  }
++  for (int anIC = 1; anIC <= aNbContours; ++anIC)
++  {
++    if (aFirstStage.Contains(anIC))
++    {
++      continue;
++    }
++    const double aRadius = Radius(anIC);
++    bool         isAdded = false;
++    for (int anIE = 1; anIE <= NbEdges(anIC); ++anIE)
++    {
++      const TopoDS_Edge&             anEdge = Edge(anIC, anIE);
++      NCollection_List<TopoDS_Shape> anImages;
++      edgeImages(anEdge, anEdgeFaces, aStage1, aShape1EdgeFaces, anImages);
++      for (NCollection_List<TopoDS_Shape>::Iterator anIt(anImages); anIt.More(); anIt.Next())
++      {
++        const TopoDS_Edge& anImage = TopoDS::Edge(anIt.Value());
++        if (!anImage.IsSame(anEdge))
++        {
++          aHistory->AddModified(anEdge, anImage);
++        }
++        const int anIC2 = aStage2.Contour(anImage);
++        if (anIC2 != 0)
++        {
++          // already in a contour, possibly reached by tangency from another one
++          if (!aStage2.IsConstant(anIC2)
++              || std::abs(aStage2.Radius(anIC2) - aRadius) > Precision::Confusion())
++          {
++            return false;
++          }
++          isAdded = true;
++          continue;
++        }
++        aStage2.Add(aRadius, anImage);
++        isAdded = isAdded || aStage2.Contour(anImage) != 0;
++      }
++    }
++    if (!isAdded)
++    {
++      return false;
++    }
++  }
++  try
++  {
++    aStage2.Build();
++  }
++  catch (Standard_Failure const&)
++  {
++    return false;
++  }
++  if (!aStage2.IsDone())
++  {
++    return false;
++  }
++
++  occ::handle<BRepTools_History> aHistory2 = new BRepTools_History();
++  addStageHistory(aShape1, aStage2, false, *aHistory2);
++  aHistory->Merge(aHistory2);
++
++  myShape         = aStage2.Shape();
++  myStagedHistory = aHistory;
++  myMap.Clear();
++  for (TopExp_Explorer anExp(myShape, TopAbs_FACE); anExp.More(); anExp.Next())
++  {
++    myMap.Add(anExp.Current());
++  }
++  Done();
++  return true;
++}
++
++//=================================================================================================
++
+ void BRepFilletAPI_MakeFillet::Build(const Message_ProgressRange& /*theRange*/)
+ {
++  myStagedHistory.Nullify();
++  if (buildConcaveFirst())
++  {
++    return;
++  }
+   myBuilder.Compute();
+   if (myBuilder.IsDone())
+   {
+@@ -392,6 +888,7 @@ void BRepFilletAPI_MakeFillet::Reset()
+   NotDone();
+   myBuilder.Reset();
+   myMap.Clear();
++  myStagedHistory.Nullify();
+ }
+ 
+ //=================================================================================================
+@@ -435,6 +932,10 @@ occ::handle<NCollection_HArray1<ChFiDS_CircSection>> BRepFilletAPI_MakeFillet::S
+ 
+ const NCollection_List<TopoDS_Shape>& BRepFilletAPI_MakeFillet::Generated(const TopoDS_Shape& EorV)
+ {
++  if (!myStagedHistory.IsNull())
++  {
++    return myStagedHistory->Generated(EorV);
++  }
+   return myBuilder.Generated(EorV);
+ }
+ 
+@@ -442,6 +943,10 @@ const NCollection_List<TopoDS_Shape>& BRepFilletAPI_MakeFillet::Generated(const
+ 
+ const NCollection_List<TopoDS_Shape>& BRepFilletAPI_MakeFillet::Modified(const TopoDS_Shape& F)
+ {
++  if (!myStagedHistory.IsNull())
++  {
++    return myStagedHistory->Modified(F);
++  }
+   myGenerated.Clear();
+ 
+   if (myBuilder.Builder()->IsSplit(F, TopAbs_OUT))
+@@ -475,6 +980,10 @@ const NCollection_List<TopoDS_Shape>& BRepFilletAPI_MakeFillet::Modified(const T
+ 
+ bool BRepFilletAPI_MakeFillet::IsDeleted(const TopoDS_Shape& F)
+ {
++  if (!myStagedHistory.IsNull())
++  {
++    return myStagedHistory->IsRemoved(F);
++  }
+   return !(myMap.Contains(F) || myBuilder.Builder()->IsSplit(F, TopAbs_OUT)
+            || myBuilder.Builder()->IsSplit(F, TopAbs_IN)
+            || myBuilder.Builder()->IsSplit(F, TopAbs_ON));
+diff --git a/src/ModelingAlgorithms/TKFillet/BRepFilletAPI/BRepFilletAPI_MakeFillet.hxx b/src/ModelingAlgorithms/TKFillet/BRepFilletAPI/BRepFilletAPI_MakeFillet.hxx
+index c44880d8b..8b7b13b56 100644
+--- a/src/ModelingAlgorithms/TKFillet/BRepFilletAPI/BRepFilletAPI_MakeFillet.hxx
++++ b/src/ModelingAlgorithms/TKFillet/BRepFilletAPI/BRepFilletAPI_MakeFillet.hxx
+@@ -36,6 +36,7 @@
+ #include <ChFiDS_CircSection.hxx>
+ #include <NCollection_HArray1.hxx>
+ #include <ChFiDS_ErrorStatus.hxx>
++#include <BRepTools_History.hxx>
+ class TopoDS_Shape;
+ class TopoDS_Edge;
+ class Law_Function;
+@@ -302,6 +303,15 @@ public:
+   //! intersection of 4 or more edges of the shape, or
+   //! -   the intersection of the fillet with a face which limits
+   //! the contour is not fully contained in this face.
++  //! When a concave contour ends at a vertex where two convex contours
++  //! end too and the faces of the vertex also meet smoothly, the concave
++  //! contours ending at such vertices are filleted first and the other
++  //! contours are filleted on the result, so that the convex fillets go
++  //! round the end of the concave one. The history (Generated, Modified,
++  //! IsDeleted) then relates the initial shape to the final result, while
++  //! the queries on the internal data structure (NbSurfaces, NewFaces,
++  //! Builder, NbComputedSurfaces, the faulty contours and vertices)
++  //! describe no computation.
+   Standard_EXPORT void Build(
+     const Message_ProgressRange& theRange = Message_ProgressRange()) override;
+ 
+@@ -379,9 +389,26 @@ public:
+   //! ChFiDS_Error: other error different from above
+   Standard_EXPORT ChFiDS_ErrorStatus StripeStatus(const int IC) const;
+ 
++private:
++  //! Fillets the concave contours ending at a vertex together with two
++  //! convex contours first, then the other contours on the result.
++  //! @return true if both stages are done; the result and its history
++  //!         are then set
++  bool buildConcaveFirst();
++
+ private:
+   ChFi3d_FilBuilder                                      myBuilder;
+   NCollection_Map<TopoDS_Shape, TopTools_ShapeMapHasher> myMap;
++  TopoDS_Shape                                           myInitialShape;
++  //! History of a result computed in two stages; null otherwise.
++  occ::handle<BRepTools_History> myStagedHistory;
++  //! Parameters given to SetParams, passed on to the stages.
++  double myParams[6];
++  bool   myHasParams;
++  //! Parameters given to SetContinuity, passed on to the stages.
++  GeomAbs_Shape myInternalContinuity;
++  double        myAngularTolerance;
++  bool          myHasContinuity;
+ };
+ 
+ #endif // _BRepFilletAPI_MakeFillet_HeaderFile
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
+index 7ae693505..9555acca0 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
+@@ -2889,6 +2889,11 @@ bool ChFi3d_Builder::CapInSectionPlane(const int            theIndex,
+   stripe->SetParameters(isfirst, aSec1, aSec2);
+   stripe->SetIndexPoint(IP1, isfirst, 1);
+   stripe->SetIndexPoint(IP2, isfirst, 2);
++  if (!myEVIMap.IsBound(Vtx))
++  {
++    myEVIMap.Bind(Vtx, NCollection_List<int>());
++  }
++  myEVIMap.ChangeFind(Vtx).Append(coin->Surf());
+   myListStripe.Append(corner);
+   return true;
+ }
+diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+index ef8d253b4..c4847b50d 100644
+--- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
++++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+@@ -1632,10 +1632,12 @@ TEST(BRepFilletAPI_MakeFilletTest, SquareHoleInRoundedCube_SecondFilletNextToFir
+ 
+ // The same holed cube with all its edges given, as by the option of FreeCAD to
+ // use all edges: the 8 edges of the hole and its 4 concave vertical edges (the
+-// other ones are smooth). Three fillets meet at each corner of the hole, which
+-// is closed by a patch. On the sphere of the corner of the cube, the boundary of
+-// the patch was computed in the parameters of the sphere and depended on its
+-// axis: a corner whose sphere has another axis was turned inside out.
++// other ones are smooth). Three fillets meet at each corner of the hole. On the
++// sphere of the corner of the cube, the boundary of the plate patch closing it
++// was computed in the parameters of the sphere and depended on its axis: a
++// corner whose sphere has another axis was turned inside out. The vertical
++// fillets are now computed first and the fillets of the edges of the hole go
++// round their ends, as when the fillets are made one after the other.
+ TEST(BRepFilletAPI_MakeFilletTest, SquareHoleInRoundedCube_AllEdgesCornersAlike)
+ {
+   const TopoDS_Shape aBox =
+@@ -1667,7 +1669,7 @@ TEST(BRepFilletAPI_MakeFilletTest, SquareHoleInRoundedCube_AllEdgesCornersAlike)
+   // The result is symmetric with respect to the axis of the hole.
+   GProp_GProps aProps;
+   BRepGProp::VolumeProperties(aResult, aProps);
+-  EXPECT_NEAR(aProps.Mass(), 5096.31, 0.05);
++  EXPECT_NEAR(aProps.Mass(), 5119.12, 0.05);
+   EXPECT_NEAR(aProps.CentreOfMass().X(), 0.0, 5.e-4);
+   EXPECT_NEAR(aProps.CentreOfMass().Y(), 0.0, 5.e-4);
+ }
+@@ -1727,8 +1729,7 @@ TEST(BRepFilletAPI_MakeFilletTest, SquareHoleInRoundedCube_ConcaveEdgeEndsInTang
+     {
+       aMaxTol = std::max(aMaxTol, BRep_Tool::Tolerance(TopoDS::Vertex(anExp.Current())));
+     }
+-    // The corner of the three fillets is a patch.
+-    EXPECT_LT(aMaxTol, aCase == 0 ? 1.e-3 : 0.02) << "case " << aCase;
++    EXPECT_LT(aMaxTol, 1.e-3) << "case " << aCase;
+ 
+     GProp_GProps aBefore, anAfter;
+     BRepGProp::VolumeProperties(aHoled, aBefore);
+@@ -1742,7 +1743,8 @@ TEST(BRepFilletAPI_MakeFilletTest, SquareHoleInRoundedCube_ConcaveEdgeEndsInTang
+     }
+     else
+     {
+-      EXPECT_NEAR(anAfter.Mass(), 5154.61, 0.05);
++      // The lower fillets go round the end of the vertical one.
++      EXPECT_NEAR(anAfter.Mass(), 5154.84, 0.05);
+     }
+   }
+ }
+@@ -1891,3 +1893,147 @@ TEST(BRepFilletAPI_MakeFilletTest, SquareHoleInRoundedCube_RimFilletGoesRoundFil
+     EXPECT_NEAR(aBefore.Mass() - anAfter.Mass(), aRemoved[r], 0.01) << "r = " << aRadii[r];
+   }
+ }
++
++// The same holed cube with a vertical (concave) edge of the hole and the two
++// upper (convex) edges at its end filleted together. Their corner was a plate
++// patch with tolerance up to 0.2. The vertical fillet is now computed first and
++// the fillets of the upper edges go round its end: the result is the one of the
++// fillets made in two steps, and the history relates it to the holed cube.
++TEST(BRepFilletAPI_MakeFilletTest, SquareHoleInRoundedCube_ThreeFilletsCornerAsInTwoSteps)
++{
++  const TopoDS_Shape aBox =
++    BRepPrimAPI_MakeBox(gp_Pnt(-10.0, -10.0, -10.0), 20.0, 20.0, 20.0).Shape();
++  BRepFilletAPI_MakeFillet aRound(aBox);
++  for (TopExp_Explorer anExp(aBox, TopAbs_EDGE); anExp.More(); anExp.Next())
++  {
++    aRound.Add(6.0, TopoDS::Edge(anExp.Current()));
++  }
++  aRound.Build();
++  ASSERT_TRUE(aRound.IsDone());
++
++  const TopoDS_Shape aTool = BRepPrimAPI_MakeBox(gp_Pnt(-4.0, -4.0, -11.0), 8.0, 8.0, 22.0).Shape();
++  BRepAlgoAPI_Cut    aCut(aRound.Shape(), aTool);
++  ASSERT_TRUE(aCut.IsDone());
++  const TopoDS_Shape& aHoled = aCut.Shape();
++
++  // Returns the edges of theShape longer than 4 whose middle is one of thePoints.
++  const auto aFindEdges = [](const TopoDS_Shape&                 theShape,
++                             const NCollection_Sequence<gp_Pnt>& thePoints) {
++    NCollection_List<TopoDS_Shape>                                anEdges;
++    NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> aMap;
++    TopExp::MapShapes(theShape, TopAbs_EDGE, aMap);
++    for (int anIE = 1; anIE <= aMap.Extent(); ++anIE)
++    {
++      GProp_GProps aProps;
++      BRepGProp::LinearProperties(aMap(anIE), aProps);
++      for (int i = 1; i <= thePoints.Length(); ++i)
++      {
++        if (aProps.Mass() > 4.0 && aProps.CentreOfMass().Distance(thePoints(i)) < 0.6)
++        {
++          anEdges.Append(aMap(anIE));
++          break;
++        }
++      }
++    }
++    return anEdges;
++  };
++  const auto aVolume = [](const TopoDS_Shape& theShape) {
++    GProp_GProps aProps;
++    BRepGProp::VolumeProperties(theShape, aProps);
++    return aProps.Mass();
++  };
++  NCollection_Sequence<gp_Pnt> aVertical, anUpper;
++  aVertical.Append(gp_Pnt(-4.0, -4.0, 0.0));
++  anUpper.Append(gp_Pnt(-4.0, 0.0, 10.0));
++  anUpper.Append(gp_Pnt(0.0, -4.0, 10.0));
++  // On the cube after the vertical fillet the upper edges are shorter by r.
++  NCollection_Sequence<gp_Pnt> anUpperShortened;
++
++  const double aRadii[3] = {0.5, 1.0, 2.0};
++  for (int r = 0; r < 3; ++r)
++  {
++    const double aRadius = aRadii[r];
++    anUpperShortened.Clear();
++    anUpperShortened.Append(gp_Pnt(-4.0, 0.5 * aRadius, 10.0));
++    anUpperShortened.Append(gp_Pnt(0.5 * aRadius, -4.0, 10.0));
++
++    // All together.
++    BRepFilletAPI_MakeFillet       aFillet(aHoled);
++    NCollection_List<TopoDS_Shape> anEdges       = aFindEdges(aHoled, aVertical);
++    NCollection_List<TopoDS_Shape> anUpperEdges1 = aFindEdges(aHoled, anUpper);
++    anEdges.Append(anUpperEdges1);
++    ASSERT_EQ(anEdges.Extent(), 3);
++    for (NCollection_List<TopoDS_Shape>::Iterator anIt(anEdges); anIt.More(); anIt.Next())
++    {
++      aFillet.Add(aRadius, TopoDS::Edge(anIt.Value()));
++    }
++    ASSERT_EQ(aFillet.NbContours(), 3);
++    aFillet.Build();
++    ASSERT_TRUE(aFillet.IsDone()) << "r = " << aRadius;
++    const TopoDS_Shape& aResult = aFillet.Shape();
++    EXPECT_TRUE(BRepCheck_Analyzer(aResult).IsValid()) << "r = " << aRadius;
++    double aMaxTol = 0.0;
++    for (TopExp_Explorer anExp(aResult, TopAbs_VERTEX); anExp.More(); anExp.Next())
++    {
++      aMaxTol = std::max(aMaxTol, BRep_Tool::Tolerance(TopoDS::Vertex(anExp.Current())));
++    }
++    EXPECT_LT(aMaxTol, 1.e-3) << "r = " << aRadius;
++
++    // In two steps.
++    BRepFilletAPI_MakeFillet aFirst(aHoled);
++    aFirst.Add(aRadius, TopoDS::Edge(aFindEdges(aHoled, aVertical).First()));
++    aFirst.Build();
++    ASSERT_TRUE(aFirst.IsDone());
++    BRepFilletAPI_MakeFillet             aSecond(aFirst.Shape());
++    const NCollection_List<TopoDS_Shape> anUpperEdges =
++      aFindEdges(aFirst.Shape(), anUpperShortened);
++    ASSERT_EQ(anUpperEdges.Extent(), 2) << "r = " << aRadius;
++    for (NCollection_List<TopoDS_Shape>::Iterator anIt(anUpperEdges); anIt.More(); anIt.Next())
++    {
++      aSecond.Add(aRadius, TopoDS::Edge(anIt.Value()));
++    }
++    aSecond.Build();
++    ASSERT_TRUE(aSecond.IsDone());
++    EXPECT_NEAR(aVolume(aResult), aVolume(aSecond.Shape()), 1.e-6) << "r = " << aRadius;
++
++    // Each face of the result is a face of the holed cube, modified from one or
++    // generated from an edge or a vertex of it.
++    NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> anInputs, aTraced;
++    TopExp::MapShapes(aHoled, TopAbs_FACE, anInputs);
++    for (int i = 1; i <= anInputs.Extent(); ++i)
++    {
++      EXPECT_FALSE(aFillet.IsDeleted(anInputs(i)));
++      for (NCollection_List<TopoDS_Shape>::Iterator anIt(aFillet.Modified(anInputs(i)));
++           anIt.More();
++           anIt.Next())
++      {
++        aTraced.Add(anIt.Value());
++      }
++    }
++    NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> aSources;
++    TopExp::MapShapes(aHoled, TopAbs_EDGE, aSources);
++    TopExp::MapShapes(aHoled, TopAbs_VERTEX, aSources);
++    for (int i = 1; i <= aSources.Extent(); ++i)
++    {
++      for (NCollection_List<TopoDS_Shape>::Iterator anIt(aFillet.Generated(aSources(i)));
++           anIt.More();
++           anIt.Next())
++      {
++        aTraced.Add(anIt.Value());
++      }
++    }
++    for (NCollection_List<TopoDS_Shape>::Iterator anIt(anEdges); anIt.More(); anIt.Next())
++    {
++      EXPECT_FALSE(aFillet.Generated(anIt.Value()).IsEmpty()) << "r = " << aRadius;
++    }
++    int aNbUntraced = 0;
++    for (TopExp_Explorer anExp(aResult, TopAbs_FACE); anExp.More(); anExp.Next())
++    {
++      if (!anInputs.Contains(anExp.Current()) && !aTraced.Contains(anExp.Current()))
++      {
++        ++aNbUntraced;
++      }
++    }
++    EXPECT_EQ(aNbUntraced, 0) << "r = " << aRadius;
++  }
++}
+diff --git a/tests/bugs/modalg_8/fillet_rounded_cube_all_edges_symmetric b/tests/bugs/modalg_8/fillet_rounded_cube_all_edges_symmetric
+index 90c974410..62d1fe080 100644
+--- a/tests/bugs/modalg_8/fillet_rounded_cube_all_edges_symmetric
++++ b/tests/bugs/modalg_8/fillet_rounded_cube_all_edges_symmetric
+@@ -6,10 +6,12 @@ puts ""
+ 
+ # All edges are given, as by the option of FreeCAD to use all edges: the 8
+ # edges of the hole and the 4 concave vertical edges, the others being smooth.
+-# Three fillets meet at each corner of the hole, which is closed by a patch.
+-# On the face of the sphere of the corner of the cube, the boundary of the
+-# patch depended on the axis of the sphere: one corner, whose sphere has a
+-# horizontal axis, was turned inside out. The corners are now the same.
++# Three fillets meet at each corner of the hole. On the face of the sphere of
++# the corner of the cube, the boundary of the plate patch closing it depended
++# on the axis of the sphere: one corner, whose sphere has a horizontal axis,
++# was turned inside out. The vertical fillets are now computed first and the
++# fillets of the edges of the hole go round their ends, as when the fillets
++# are made one after the other: the corners are the same.
+ restore [locate_data_file freecad20085_rounded_cube_pocket.brep] b
+ explode b E
+ 
+@@ -20,8 +22,8 @@ foreach e [explode b E] {
+ eval blend result b $all
+ 
+ checkshape result
+-checkmaxtol result -ref 0.0788
+-checkprops result -v 5096.3
++checkmaxtol result -ref 1.2e-4
++checkprops result -v 5119.12
+ 
+ # The result is symmetric with respect to the axis of the hole.
+ regexp {X += +([-0-9.e+]+)\s+Y += +([-0-9.e+]+)} [vprops result] full aX aY
+diff --git a/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_concave_edge b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_concave_edge
+index 8288a45f8..eb32ae698 100644
+--- a/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_concave_edge
++++ b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_concave_edge
+@@ -20,8 +20,9 @@ checkmaxtol result -ref 1.e-4
+ # the fillet adds r * r * (1 - pi / 4) * 20 = 17.168 mm3
+ checkprops result -v 5172.28
+ 
+-# with the lower edges on both sides of it (Edge33, Edge42, Edge57 in FreeCAD)
++# with the lower edges on both sides of it (Edge33, Edge42, Edge57 in FreeCAD):
++# the lower fillets go round the end of the vertical one
+ blend result2 b 1 b_33 1 b_42 1 b_57
+ checkshape result2
+-checkmaxtol result2 -ref 0.0137
+-checkprops result2 -v 5154.61
++checkmaxtol result2 -ref 1.e-4
++checkprops result2 -v 5154.84
+diff --git a/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_rim_after_corner b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_rim_after_corner
+index 3d7322fb2..58c92dbdd 100644
+--- a/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_rim_after_corner
++++ b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_rim_after_corner
+@@ -14,7 +14,7 @@ puts ""
+ restore [locate_data_file freecad20085_rounded_cube_pocket.brep] b
+ explode b E
+ 
+-foreach {r tol vol} {1 0.0137 5150.04 2 0.0702 5114.92} {
++foreach {r tol vol} {1 2.4e-4 5150.26 2 1.5e-4 5117.77} {
+   blend r1 b $r b_26 $r b_13 $r b_35
+ 
+   # the lower edge on the wall y = -4, shortened by the first fillet
+@@ -34,7 +34,8 @@ foreach {r tol vol} {1 0.0137 5150.04 2 0.0702 5114.92} {
+   blend result r1 $r $e2
+ 
+   checkshape result
+-  # the tolerance is the one of the corner of the first fillets
++  # the tolerance is the one of the first fillets, where the upper ones go
++  # round the end of the vertical one
+   checkmaxtol result -ref $tol
+   checkprops result -v $vol
+ }
+diff --git a/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_three_fillets_corner b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_three_fillets_corner
+new file mode 100644
+index 000000000..f54e568c9
+--- /dev/null
++++ b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_three_fillets_corner
+@@ -0,0 +1,41 @@
++puts "============"
++puts "Modeling Algorithms - Corner of a concave fillet and two convex fillets at a square hole in a rounded cube"
++puts "(FreeCAD issue 20085: cube 20 with fillets of radius 6, square hole 8 x 8)"
++puts "============"
++puts ""
++
++# A vertical (concave) edge of the hole and the two upper (convex) edges at its
++# end are filleted together (Fillet001 in FreeCAD). The vertex has more edges
++# (smooth edges between the fillets and the sphere of the cube) and the corner
++# was a plate patch with tolerance 0.0068 (r = 0.5) to 0.21 (r = 2.5). The
++# vertical fillet is now computed first and the fillets of the upper edges go
++# round its end: the result is the one of the fillets made in two steps.
++restore [locate_data_file freecad20085_rounded_cube_pocket.brep] b
++explode b E
++
++foreach {r tol vol} {0.5 5.e-4 5155.21 1 2.4e-4 5154.84 2 1.5e-4 5145.02 2.5 1.e-4 5124.27} {
++  blend result b $r b_26 $r b_13 $r b_35
++  checkshape result
++  checkmaxtol result -ref $tol
++  checkprops result -v $vol
++
++  # in two steps: the vertical edge, then the upper edges shortened by it
++  blend r1 b $r b_26
++  set upper {}
++  foreach e [explode r1 E] {
++    set bb [bounding $e]
++    if {abs([lindex $bb 2] - 10.) < 1.e-3 && abs([lindex $bb 5] - 10.) < 1.e-3
++        && ((abs([lindex $bb 0] + 4.) < 1.e-3 && abs([lindex $bb 3] + 4.) < 1.e-3
++             && [lindex $bb 4] - [lindex $bb 1] > 4.)
++         || (abs([lindex $bb 1] + 4.) < 1.e-3 && abs([lindex $bb 4] + 4.) < 1.e-3
++             && [lindex $bb 3] - [lindex $bb 0] > 4.))} {
++      lappend upper $r $e
++    }
++  }
++  if {[llength $upper] != 4} {
++    puts "Error: r = $r, the upper edges are not found"
++    continue
++  }
++  eval blend r2 r1 $upper
++  checkprops r2 -equal result
++}
+-- 
+2.43.0
+

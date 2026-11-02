@@ -1,0 +1,1433 @@
+From d4901b07a230dbaba62247a4ff35d5e5a8c0d2af Mon Sep 17 00:00:00 2001
+From: Kuzma30 <kuzemkoa@gmail.com>
+Date: Mon, 26 Oct 2026 14:46:15 +0200
+Subject: [PATCH 15/24] Modeling Algorithms - Compute fillets of constant
+ radius as rolling balls
+
+BlendFunc_ConstRad took the center of a section of the fillet from the
+normals of the surfaces projected on the plane normal to the guide: the
+section was the circle tangent to the sections of the faces by that plane.
+Where the normals of the faces leave that plane (a helical root, a cone off
+the edge, a face inclined to the edge) this is not a ball touching the
+faces. On the start wall of the FreeCAD screw thread, next to the fillet of
+the root, the trace on the wall went 0.015 mm out of the one of the rolling
+ball at radius 0.5, made a hook at 0.8 and a bulge instead of the corner at
+1; on a quarter of a cone the fillet missed the ball by 0.22 with a radius
+of 10. SolidWorks gives the rolling ball, to 0.003 mm of an independent
+computation, on all these.
+
+- BlendFunc_ConstRad and BlendFunc_ConstRadInv: the center is on the full
+  normals of the surfaces, pts1 + ray1 * N1 = pts2 + ray2 * N2, the middle
+  of the points of contact staying in the plane normal to the guide; the
+  section is the circle of the ball in the plane through its center and
+  the points of contact (its normal and derivatives replace the ones of the
+  plane of the guide in the sections given to the approximation). Only the
+  plane depends on the parameter of the guide now. SetRollingBall(false)
+  keeps the previous section.
+- ChFi3d_Builder::Compute: the ends and corners of the fillets were built
+  for sections in the planes of the guides, and some of them cannot follow
+  the ball (a ball which nests in a fillet of its own radius, a support
+  face with a kink, a corner where the ball does not fit). When the result
+  with the ball fails, is invalid or has a tolerance above 10 times the
+  approximation tolerance, the contours are restored and computed again
+  with the previous section, and the better result is kept.
+
+On the screw the fillet of the wall is valid for radii 0.08-1.83 except
+0.46 (0.43-0.45, 0.47 and 0.525, which failed, are built now); the full
+chain of the file with FreeCAD's refine stays valid with tolerance 3.1e-4.
+
+GTest BRepFilletAPI_MakeFilletTest.ConstantRadius_FollowsRollingBall. The tests
+blend/simple/C8 and D1 (corners of a quarter of a cone) get a spherical
+corner from the ball and their new areas; the tests of the screw get their
+new values.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
+---
+ .../TKFillet/BlendFunc/BlendFunc_ConstRad.cxx | 409 ++++++++++++++----
+ .../TKFillet/BlendFunc/BlendFunc_ConstRad.hxx |  14 +
+ .../BlendFunc/BlendFunc_ConstRadInv.cxx       | 206 +++++++++
+ .../BlendFunc/BlendFunc_ConstRadInv.hxx       |   5 +
+ .../TKFillet/ChFi3d/ChFi3d_Builder.cxx        |  95 ++++
+ .../TKFillet/ChFi3d/ChFi3d_Builder.hxx        |   9 +
+ .../TKFillet/ChFi3d/ChFi3d_Builder_1.cxx      |   2 +
+ .../TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx     |  16 +-
+ .../TKFillet/ChFi3d/ChFi3d_FilBuilder_C3.cxx  |   5 +-
+ .../GTests/BRepFilletAPI_MakeFillet_Test.cxx  |  99 +++++
+ tests/blend/simple/C8                         |   2 +-
+ tests/blend/simple/D1                         |   2 +-
+ .../fillet_root_rolling_on_wall_fillet        |   2 +-
+ .../fillet_thread_convex_concave_corner       |   4 +-
+ tests/bugs/modalg_8/fillet_thread_on_seam     |   4 +-
+ .../fillet_wall_profile_corner_at_root        |   4 +-
+ .../modalg_8/fillet_wall_profile_cusp_ends    |   4 +-
+ .../modalg_8/fillet_wall_profile_over_root    |  12 +-
+ .../fillet_wall_profile_smooth_at_root        |  11 +-
+ .../fillet_wall_start_after_extension         |   2 +-
+ 20 files changed, 787 insertions(+), 120 deletions(-)
+
+diff --git a/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRad.cxx b/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRad.cxx
+index 08e0bb20a..f41319cc0 100644
+--- a/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRad.cxx
++++ b/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRad.cxx
+@@ -40,6 +40,80 @@
+ 
+ #define Eps 1.e-15
+ 
++namespace
++{
++// Unit vector of theV and its derivatives, given the derivatives of theV.
++gp_Vec Unit(const gp_Vec& theV)
++{
++  const double aM = theV.Magnitude();
++  return aM > Eps ? theV / aM : theV;
++}
++
++gp_Vec DUnit(const gp_Vec& theV, const gp_Vec& theDV)
++{
++  const double aM2 = theV.SquareMagnitude();
++  if (aM2 < Eps * Eps)
++  {
++    return theDV;
++  }
++  return (theDV - theV * (theV.Dot(theDV) / aM2)) / std::sqrt(aM2);
++}
++
++gp_Vec D2Unit(const gp_Vec& theV, const gp_Vec& theDa, const gp_Vec& theDb, const gp_Vec& theDab)
++{
++  const double aM2 = theV.SquareMagnitude();
++  if (aM2 < Eps * Eps)
++  {
++    return theDab;
++  }
++  const double aVa = theV.Dot(theDa), aVb = theV.Dot(theDb);
++  gp_Vec       aRes = theDab - theDa * (aVb / aM2) - theDb * (aVa / aM2);
++  aRes -= theV * ((theDa.Dot(theDb) + theV.Dot(theDab)) / aM2);
++  aRes += theV * (3. * aVa * aVb / (aM2 * aM2));
++  return aRes / std::sqrt(aM2);
++}
++
++// The unit vector -N / |N| from a point of a surface of normal N towards the
++// center of a ball of negative radius, and its derivatives.
++gp_Vec UnitNormal(const gp_Vec& theN)
++{
++  return -Unit(theN);
++}
++
++gp_Vec DUnitNormal(const gp_Vec& theN, const gp_Vec& theDN)
++{
++  return -DUnit(theN, theDN);
++}
++
++gp_Vec D2UnitNormal(const gp_Vec& theN,
++                    const gp_Vec& theDa,
++                    const gp_Vec& theDb,
++                    const gp_Vec& theDab)
++{
++  return -D2Unit(theN, theDa, theDb, theDab);
++}
++
++// The normal of the plane of a section, the circle through the points
++// Center + R * theNs1 and Center + R * theNs2, oriented as theRef (the
++// normal of the plane of the guide): the arc from theNs1 to theNs2 turns
++// around it, as in that plane. When the two directions are parallel, the
++// plane of the guide is taken.
++bool CircleNormal(const gp_Vec& theNs1,
++                  const gp_Vec& theNs2,
++                  const gp_Vec& theRef,
++                  gp_Vec&       theNormal)
++{
++  const gp_Vec aS = theNs1.Crossed(theNs2);
++  if (aS.Magnitude() < 1.e-6)
++  {
++    theNormal = theRef;
++    return false;
++  }
++  theNormal = aS.Dot(theRef) >= 0. ? Unit(aS) : -Unit(aS);
++  return true;
++}
++} // namespace
++
+ //=================================================================================================
+ 
+ BlendFunc_ConstRad::BlendFunc_ConstRad(const occ::handle<Adaptor3d_Surface>& S1,
+@@ -49,6 +123,7 @@ BlendFunc_ConstRad::BlendFunc_ConstRad(const occ::handle<Adaptor3d_Surface>& S1,
+       surf2(S2),
+       curv(C),
+       tcurv(C),
++      myIsBall(true),
+       istangent(true),
+       param(0.0),
+       ray1(0.0),
+@@ -124,6 +199,36 @@ void BlendFunc_ConstRad::Set(const BlendFunc_SectionShape TypeSection)
+   mySShape = TypeSection;
+ }
+ 
++//=================================================================================================
++
++void BlendFunc_ConstRad::SetRollingBall(const bool theIsBall)
++{
++  myIsBall = theIsBall;
++  // The cache of the values is no more valid.
++  tval = -9.876e100;
++  xval.Init(-9.876e100);
++  myXOrder = -1;
++  myTOrder = -1;
++}
++
++//=================================================================================================
++
++gp_Vec BlendFunc_ConstRad::SectionNormal(const gp_Vec& theN) const
++{
++  if (myIsBall)
++  {
++    return UnitNormal(theN);
++  }
++  double aNorm = nplan.Crossed(theN).Magnitude();
++  if (aNorm < Eps)
++  {
++    aNorm = 1; // Unsatisfactory, but it is not necessary to stop
++  }
++  gp_Vec aRes;
++  aRes.SetLinearForm(nplan.Dot(theN) / aNorm, nplan, -1. / aNorm, theN);
++  return aRes;
++}
++
+ //=======================================================================
+ // function : ComputeValues
+ // purpose  : OBLIGATORY passage for all calculations
+@@ -279,7 +384,142 @@ bool BlendFunc_ConstRad::ComputeValues(const math_Vector& X,
+     }
+   }
+ 
+-  // -------------------- Positioning of order 0 ---------------------
++  if (myIsBall)
++  {
++    // -------------------- Positioning of order 0 ---------------------
++    // The ball touches the surfaces: its center is pts1 + ray1 * N1 = pts2 + ray2 * N2,
++    // Ni = -nsurfi / |nsurfi| being the unit normals of the surfaces, and the
++    // middle of the points of contact lies in the plane normal to the guide.
++    // The section is the circle of the ball through the points of contact.
++    const double theD = -(nplan.XYZ().Dot(ptgui.XYZ()));
++    const gp_Vec aMid((pts1.XYZ() + pts2.XYZ()) / 2);
++    E(1) = nplan.XYZ().Dot(aMid.XYZ()) + theD;
++
++    gp_Vec resul, temp;
++    resul.SetLinearForm(ray1, UnitNormal(nsurf1), gp_Vec(pts2, pts1));
++    resul.Subtract(ray2 * UnitNormal(nsurf2));
++    E(2) = resul.X();
++    E(3) = resul.Y();
++    E(4) = resul.Z();
++
++    // -------------------- Positioning of order 1 ---------------------
++    if (Order >= 1)
++    {
++      dndu1 = DUnitNormal(nsurf1, dns1u1);
++      dndv1 = DUnitNormal(nsurf1, dns1v1);
++      dndu2 = DUnitNormal(nsurf2, dns1u2);
++      dndv2 = DUnitNormal(nsurf2, dns1v2);
++
++      DEDX(1, 1) = nplan.Dot(d1u1) / 2;
++      DEDX(1, 2) = nplan.Dot(d1v1) / 2;
++      DEDX(1, 3) = nplan.Dot(d1u2) / 2;
++      DEDX(1, 4) = nplan.Dot(d1v2) / 2;
++
++      resul.SetLinearForm(ray1, dndu1, d1u1);
++      DEDX(2, 1) = resul.X();
++      DEDX(3, 1) = resul.Y();
++      DEDX(4, 1) = resul.Z();
++      resul.SetLinearForm(ray1, dndv1, d1v1);
++      DEDX(2, 2) = resul.X();
++      DEDX(3, 2) = resul.Y();
++      DEDX(4, 2) = resul.Z();
++      resul.SetLinearForm(-ray2, dndu2, -1, d1u2);
++      DEDX(2, 3) = resul.X();
++      DEDX(3, 3) = resul.Y();
++      DEDX(4, 3) = resul.Z();
++      resul.SetLinearForm(-ray2, dndv2, -1, d1v2);
++      DEDX(2, 4) = resul.X();
++      DEDX(3, 4) = resul.Y();
++      DEDX(4, 4) = resul.Z();
++
++      if (byParam)
++      {
++        // Only the plane depends on the guide.
++        temp.SetXYZ(aMid.XYZ() - ptgui.XYZ());
++        dn1w.SetCoord(0., 0., 0.);
++        dn2w.SetCoord(0., 0., 0.);
++        DEDT(1) = dnplan.Dot(temp) - 1. / invnormtg;
++        DEDT(2) = DEDT(3) = DEDT(4) = 0.;
++      }
++      // ------   Positioning of order 2  -----------------------------
++      if (Order == 2)
++      {
++        D2EDX2.Init(0);
++
++        // Second derivatives of the normals of the surfaces
++        const gp_Vec d2ns1u1  = d3u1.Crossed(d1v1) + 2 * d2u1.Crossed(d2uv1) + d1u1.Crossed(d3uuv1);
++        const gp_Vec d2ns1uv1 = d3uuv1.Crossed(d1v1) + d2u1.Crossed(d2v1) + d1u1.Crossed(d3uvv1);
++        const gp_Vec d2ns1v1  = d1u1.Crossed(d3v1) + 2 * d2uv1.Crossed(d2v1) + d3uvv1.Crossed(d1v1);
++        const gp_Vec d2ns1u2  = d3u2.Crossed(d1v2) + 2 * d2u2.Crossed(d2uv2) + d1u2.Crossed(d3uuv2);
++        const gp_Vec d2ns1uv2 = d3uuv2.Crossed(d1v2) + d2u2.Crossed(d2v2) + d1u2.Crossed(d3uvv2);
++        const gp_Vec d2ns1v2  = d1u2.Crossed(d3v2) + 2 * d2uv2.Crossed(d2v2) + d3uvv2.Crossed(d1v2);
++
++        d2ndu1  = D2UnitNormal(nsurf1, dns1u1, dns1u1, d2ns1u1);
++        d2nduv1 = D2UnitNormal(nsurf1, dns1u1, dns1v1, d2ns1uv1);
++        d2ndv1  = D2UnitNormal(nsurf1, dns1v1, dns1v1, d2ns1v1);
++        d2ndu2  = D2UnitNormal(nsurf2, dns1u2, dns1u2, d2ns1u2);
++        d2nduv2 = D2UnitNormal(nsurf2, dns1u2, dns1v2, d2ns1uv2);
++        d2ndv2  = D2UnitNormal(nsurf2, dns1v2, dns1v2, d2ns1v2);
++
++        D2EDX2(1, 1, 1) = nplan.Dot(d2u1) / 2;
++        D2EDX2(1, 2, 1) = D2EDX2(1, 1, 2) = nplan.Dot(d2uv1) / 2;
++        D2EDX2(1, 2, 2)                   = nplan.Dot(d2v1) / 2;
++
++        D2EDX2(1, 3, 3) = nplan.Dot(d2u2) / 2;
++        D2EDX2(1, 4, 3) = D2EDX2(1, 3, 4) = nplan.Dot(d2uv2) / 2;
++        D2EDX2(1, 4, 4)                   = nplan.Dot(d2v2) / 2;
++
++        resul.SetLinearForm(ray1, d2ndu1, d2u1);
++        D2EDX2(2, 1, 1) = resul.X();
++        D2EDX2(3, 1, 1) = resul.Y();
++        D2EDX2(4, 1, 1) = resul.Z();
++        resul.SetLinearForm(ray1, d2nduv1, d2uv1);
++        D2EDX2(2, 2, 1) = D2EDX2(2, 1, 2) = resul.X();
++        D2EDX2(3, 2, 1) = D2EDX2(3, 1, 2) = resul.Y();
++        D2EDX2(4, 2, 1) = D2EDX2(4, 1, 2) = resul.Z();
++        resul.SetLinearForm(ray1, d2ndv1, d2v1);
++        D2EDX2(2, 2, 2) = resul.X();
++        D2EDX2(3, 2, 2) = resul.Y();
++        D2EDX2(4, 2, 2) = resul.Z();
++
++        resul.SetLinearForm(-ray2, d2ndu2, -1, d2u2);
++        D2EDX2(2, 3, 3) = resul.X();
++        D2EDX2(3, 3, 3) = resul.Y();
++        D2EDX2(4, 3, 3) = resul.Z();
++        resul.SetLinearForm(-ray2, d2nduv2, -1, d2uv2);
++        D2EDX2(2, 4, 3) = D2EDX2(2, 3, 4) = resul.X();
++        D2EDX2(3, 4, 3) = D2EDX2(3, 3, 4) = resul.Y();
++        D2EDX2(4, 4, 3) = D2EDX2(4, 3, 4) = resul.Z();
++        resul.SetLinearForm(-ray2, d2ndv2, -1, d2v2);
++        D2EDX2(2, 4, 4) = resul.X();
++        D2EDX2(3, 4, 4) = resul.Y();
++        D2EDX2(4, 4, 4) = resul.Z();
++
++        if (byParam)
++        {
++          //  ---------- Derivation double in t, X --------------------------
++          D2EDXDT.Init(0.);
++          D2EDXDT(1, 1) = dnplan.Dot(d1u1) / 2;
++          D2EDXDT(1, 2) = dnplan.Dot(d1v1) / 2;
++          D2EDXDT(1, 3) = dnplan.Dot(d1u2) / 2;
++          D2EDXDT(1, 4) = dnplan.Dot(d1v2) / 2;
++          d2ndtu1.SetCoord(0., 0., 0.);
++          d2ndtv1.SetCoord(0., 0., 0.);
++          d2ndtu2.SetCoord(0., 0., 0.);
++          d2ndtv2.SetCoord(0., 0., 0.);
++
++          //  ---------- Derivation double in t -----------------------------
++          d2n1w.SetCoord(0., 0., 0.);
++          d2n2w.SetCoord(0., 0., 0.);
++          temp.SetXYZ(aMid.XYZ() - ptgui.XYZ());
++          D2EDT2(1) = d2nplan.Dot(temp) - 2 * dnplan.Dot(d1gui) - nplan.Dot(d2gui);
++          D2EDT2(2) = D2EDT2(3) = D2EDT2(4) = 0.;
++        }
++      }
++    }
++    return true;
++  }
++
+   double invnorm1, invnorm2, ndotns1, ndotns2, theD;
+   gp_Vec ncrossns1, ncrossns2, resul, temp;
+ 
+@@ -830,7 +1070,7 @@ void BlendFunc_ConstRad::GetBounds(math_Vector& InfBound, math_Vector& SupBound)
+ 
+ bool BlendFunc_ConstRad::IsSolution(const math_Vector& Sol, const double Tol)
+ {
+-  double norm, Cosa, Sina, Angle;
++  double Cosa, Sina, Angle;
+   bool   Ok = true;
+ 
+   Ok = ComputeValues(Sol, 1, true, param);
+@@ -844,19 +1084,8 @@ bool BlendFunc_ConstRad::IsSolution(const math_Vector& Sol, const double Tol)
+     ns2 = nsurf2;
+     np  = nplan;
+ 
+-    norm = nplan.Crossed(ns1).Magnitude();
+-    if (norm < Eps)
+-    {
+-      norm = 1; // Unsatisfactory, but it is not necessary to stop
+-    }
+-    ns1.SetLinearForm(nplan.Dot(ns1) / norm, nplan, -1. / norm, ns1);
+-
+-    norm = nplan.Crossed(ns2).Magnitude();
+-    if (norm < Eps)
+-    {
+-      norm = 1; // Unsatisfactory, but it is not necessary to stop
+-    }
+-    ns2.SetLinearForm(nplan.Dot(ns2) / norm, nplan, -1. / norm, ns2);
++    ns1 = SectionNormal(ns1);
++    ns2 = SectionNormal(ns2);
+ 
+     double      maxpiv = 1.e-9;
+     math_Vector controle(1, 4), solution(1, 4), tolerances(1, 4);
+@@ -914,7 +1143,11 @@ bool BlendFunc_ConstRad::IsSolution(const math_Vector& Sol, const double Tol)
+       ns2.Reverse();
+     }
+     Cosa = ns1.Dot(ns2);
+-    Sina = np.Dot(ns1.Crossed(ns2));
++    Sina = ns1.Crossed(ns2).Magnitude();
++    if (np.Dot(ns1.Crossed(ns2)) < 0.)
++    {
++      Sina = -Sina;
++    }
+     if (choix % 2 != 0)
+     {
+       Sina = -Sina; // nplan is changed in -nplan
+@@ -1074,7 +1307,6 @@ void BlendFunc_ConstRad::Tangent(const double U1,
+ {
+   gp_Pnt Center;
+   gp_Vec ns1;
+-  double invnorm1;
+ 
+   if ((U1 != xval(1)) || (V1 != xval(2)) || (U2 != xval(3)) || (V2 != xval(4)))
+   {
+@@ -1091,21 +1323,16 @@ void BlendFunc_ConstRad::Tangent(const double U1,
+     NmL       = nsurf2;
+   }
+ 
+-  invnorm1 = nplan.Crossed(ns1).Magnitude();
+-  if (invnorm1 < Eps)
+-  {
+-    invnorm1 = 1;
+-  }
+-  else
++  Center.SetXYZ(pts1.XYZ() + ray1 * SectionNormal(ns1).XYZ());
++
++  // The plane of the section, oriented as the plane of the guide.
++  gp_Vec aNorm;
++  if (!myIsBall || !CircleNormal(gp_Vec(Center, pts1), gp_Vec(Center, pts2), nplan, aNorm))
+   {
+-    invnorm1 = 1. / invnorm1;
++    aNorm = nplan;
+   }
+-
+-  ns1.SetLinearForm(nplan.Dot(ns1) * invnorm1, nplan, -invnorm1, ns1);
+-  Center.SetXYZ(pts1.XYZ() + ray1 * ns1.XYZ());
+-
+-  TgF = nplan.Crossed(gp_Vec(Center, pts1));
+-  TgL = nplan.Crossed(gp_Vec(Center, pts2));
++  TgF = aNorm.Crossed(gp_Vec(Center, pts1));
++  TgL = aNorm.Crossed(gp_Vec(Center, pts2));
+   if (choix % 2 == 1)
+   {
+     TgF.Reverse();
+@@ -1161,13 +1388,7 @@ void BlendFunc_ConstRad::Section(const double Param,
+   ns1 = nsurf1;
+   np  = nplan;
+ 
+-  double norm1;
+-  norm1 = nplan.Crossed(ns1).Magnitude();
+-  if (norm1 < Eps)
+-  {
+-    norm1 = 1; // Unsatisfactory, but it is not necessary to stop
+-  }
+-  ns1.SetLinearForm(nplan.Dot(ns1) / norm1, nplan, -1. / norm1, ns1);
++  ns1 = SectionNormal(ns1);
+   Center.SetXYZ(pts1.XYZ() + ray1 * ns1.XYZ());
+ 
+   // ns1 is oriented from the center to pts1,
+@@ -1180,6 +1401,11 @@ void BlendFunc_ConstRad::Section(const double Param,
+   {
+     np.Reverse();
+   }
++  // The plane of the ball through the two points.
++  if (myIsBall)
++  {
++    CircleNormal(ns1, gp_Vec(Center, pts2), np, np);
++  }
+   C.SetRadius(std::abs(ray1));
+   C.SetPosition(gp_Ax2(Center, np, ns1));
+   Pdeb = 0.;
+@@ -1313,25 +1539,14 @@ void BlendFunc_ConstRad::Section(const Blend_Point&            P,
+     return;
+   }
+ 
+-  double norm1, norm2;
+-  norm1 = nplan.Crossed(ns1).Magnitude();
+-  norm2 = nplan.Crossed(ns2).Magnitude();
+-  if (norm1 < Eps)
+-  {
+-    norm1 = 1; // Unsatisfactory, but it is not necessary to stop
+-  }
+-  if (norm2 < Eps)
+-  {
+-    norm2 = 1; // Unsatisfactory, but it is not necessary to stop
+-  }
+-
+-  ns1.SetLinearForm(nplan.Dot(ns1) / norm1, nplan, -1. / norm1, ns1);
+-  ns2.SetLinearForm(nplan.Dot(ns2) / norm2, nplan, -1. / norm2, ns2);
++  ns1 = SectionNormal(ns1);
++  ns2 = SectionNormal(ns2);
+ 
+   Center.SetXYZ(pts1.XYZ() + ray1 * ns1.XYZ());
+ 
+   // ns1 (resp. ns2) is oriented from center to pts1 (resp. pts2),
+-  // and the triedron ns1,ns2,nplan is made direct.
++  // and the triedron ns1,ns2,np is made direct, np being the normal of the
++  // plane of the ball through the two points.
+ 
+   if (ray1 > 0.)
+   {
+@@ -1345,6 +1560,10 @@ void BlendFunc_ConstRad::Section(const Blend_Point&            P,
+   {
+     np.Reverse();
+   }
++  if (myIsBall)
++  {
++    CircleNormal(ns1, ns2, np, np);
++  }
+ 
+   GeomFill::GetCircle(myTConv, ns1, ns2, np, pts1, pts2, std::abs(ray1), Center, Poles, Weights);
+ }
+@@ -1360,7 +1579,6 @@ bool BlendFunc_ConstRad::Section(const Blend_Point&            P,
+                                  NCollection_Array1<double>&   DWeights)
+ {
+   gp_Vec ns1, ns2, np, dnp, dnorm1w, dnorm2w, tgc;
+-  double norm1, norm2;
+ 
+   gp_Pnt      Center;
+   math_Vector sol(1, 4), secmember(1, 4);
+@@ -1442,25 +1660,8 @@ bool BlendFunc_ConstRad::Section(const Blend_Point&            P,
+   }
+ 
+   // Case of the circle
+-  norm1 = nplan.Crossed(ns1).Magnitude();
+-  norm2 = nplan.Crossed(ns2).Magnitude();
+-  if (norm1 < Eps)
+-  {
+-    norm1 = 1; // Unsatisfactory, but it is not necessary to stop
+-#ifdef OCCT_DEBUG
+-    std::cout << " ConstRad : Surface singuliere " << std::endl;
+-#endif
+-  }
+-  if (norm2 < Eps)
+-  {
+-    norm2 = 1; // Unsatisfactory, but it is not necessary to stop
+-#ifdef OCCT_DEBUG
+-    std::cout << " ConstRad : Surface singuliere " << std::endl;
+-#endif
+-  }
+-
+-  ns1.SetLinearForm(nplan.Dot(ns1) / norm1, nplan, -1. / norm1, ns1);
+-  ns2.SetLinearForm(nplan.Dot(ns2) / norm2, nplan, -1. / norm2, ns2);
++  ns1 = SectionNormal(ns1);
++  ns2 = SectionNormal(ns2);
+ 
+   Center.SetXYZ(pts1.XYZ() + ray1 * ns1.XYZ());
+   if (!istgt)
+@@ -1492,6 +1693,24 @@ bool BlendFunc_ConstRad::Section(const Blend_Point&            P,
+     np.Reverse();
+     dnp.Reverse();
+   }
++  // The plane of the ball through the two points.
++  {
++    const gp_Vec aS = ns1.Crossed(ns2);
++    gp_Vec       aNorm;
++    if (myIsBall && CircleNormal(ns1, ns2, np, aNorm))
++    {
++      if (!istgt)
++      {
++        const gp_Vec aDS = dnorm1w.Crossed(ns2) + ns1.Crossed(dnorm2w);
++        dnp              = DUnit(aS, aDS);
++        if (aS.Dot(np) < 0.)
++        {
++          dnp.Reverse();
++        }
++      }
++      np = aNorm;
++    }
++  }
+ 
+   if (!istgt)
+   {
+@@ -1537,7 +1756,6 @@ bool BlendFunc_ConstRad::Section(const Blend_Point&            P,
+ {
+   gp_Vec ns1, ns2, np, dnp, d2np, dnorm1w, dnorm2w, d2norm1w, d2norm2w;
+   gp_Vec tgc, dtgc, dtg1, dtg2, temp, tempbis;
+-  double norm1, norm2;
+ 
+   gp_Pnt      Center;
+   math_Vector X(1, 4), sol(1, 4), secmember(1, 4);
+@@ -1799,25 +2017,8 @@ bool BlendFunc_ConstRad::Section(const Blend_Point&            P,
+   }
+ 
+   // Case of circle
+-  norm1 = nplan.Crossed(ns1).Magnitude();
+-  norm2 = nplan.Crossed(ns2).Magnitude();
+-  if (norm1 < Eps)
+-  {
+-    norm1 = 1; // Unsatisfactory, but it is not necessary to stop
+-#ifdef OCCT_DEBUG
+-    std::cout << " ConstRad : Surface singuliere " << std::endl;
+-#endif
+-  }
+-  if (norm2 < Eps)
+-  {
+-    norm2 = 1; // Unsatisfactory, but it is not necessary to stop
+-#ifdef OCCT_DEBUG
+-    std::cout << " ConstRad : Surface singuliere " << std::endl;
+-#endif
+-  }
+-
+-  ns1.SetLinearForm(nplan.Dot(ns1) / norm1, nplan, -1. / norm1, ns1);
+-  ns2.SetLinearForm(nplan.Dot(ns2) / norm2, nplan, -1. / norm2, ns2);
++  ns1 = SectionNormal(ns1);
++  ns2 = SectionNormal(ns2);
+ 
+   Center.SetXYZ(pts1.XYZ() + ray1 * ns1.XYZ());
+   if (!istgt)
+@@ -1853,6 +2054,28 @@ bool BlendFunc_ConstRad::Section(const Blend_Point&            P,
+     dnp.Reverse();
+     d2np.Reverse();
+   }
++  // The plane of the ball through the two points.
++  {
++    const gp_Vec aS = ns1.Crossed(ns2);
++    gp_Vec       aNorm;
++    if (myIsBall && CircleNormal(ns1, ns2, np, aNorm))
++    {
++      if (!istgt)
++      {
++        const gp_Vec aDS = dnorm1w.Crossed(ns2) + ns1.Crossed(dnorm2w);
++        const gp_Vec aD2S =
++          d2norm1w.Crossed(ns2) + 2. * dnorm1w.Crossed(dnorm2w) + ns1.Crossed(d2norm2w);
++        dnp  = DUnit(aS, aDS);
++        d2np = D2Unit(aS, aDS, aDS, aD2S);
++        if (aS.Dot(np) < 0.)
++        {
++          dnp.Reverse();
++          d2np.Reverse();
++        }
++      }
++      np = aNorm;
++    }
++  }
+ 
+   if (!istgt)
+   {
+@@ -1890,7 +2113,7 @@ bool BlendFunc_ConstRad::Section(const Blend_Point&            P,
+     GeomFill::GetCircle(myTConv,
+                         ns1,
+                         ns2,
+-                        nplan,
++                        myIsBall ? np : nplan,
+                         pts1,
+                         pts2,
+                         std::abs(ray1),
+diff --git a/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRad.hxx b/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRad.hxx
+index 00a6ce9b0..065365548 100644
+--- a/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRad.hxx
++++ b/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRad.hxx
+@@ -117,6 +117,13 @@ public:
+   //! approximations.
+   Standard_EXPORT void Set(const BlendFunc_SectionShape TypeSection);
+ 
++  //! Chooses the section of the blend (true by default): the circle of a
++  //! ball of the radius touching the two surfaces, whose points of contact
++  //! have their middle in the plane normal to the guide; or (false) the
++  //! circle tangent to the sections of the surfaces by that plane.
++  //! @param[in] theIsBall true for the circle of the rolling ball
++  Standard_EXPORT void SetRollingBall(const bool theIsBall);
++
+   //! Useful for a quick and approximate visualization of the surface area.
+   Standard_EXPORT void Section(const double Param,
+                                const double U1,
+@@ -205,10 +212,17 @@ private:
+                                      const bool         ByParam = false,
+                                      const double       Param   = 0);
+ 
++  //! The unit vector from a point of contact towards the center, for a
++  //! negative radius, given the normal theN of the surface there.
++  //! @param[in] theN normal of the surface at the point of contact
++  //! @return the unit vector towards the center of the section
++  gp_Vec SectionNormal(const gp_Vec& theN) const;
++
+   occ::handle<Adaptor3d_Surface> surf1;
+   occ::handle<Adaptor3d_Surface> surf2;
+   occ::handle<Adaptor3d_Curve>   curv;
+   occ::handle<Adaptor3d_Curve>   tcurv;
++  bool                           myIsBall;
+   gp_Pnt                         pts1;
+   gp_Pnt                         pts2;
+   bool                           istangent;
+diff --git a/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRadInv.cxx b/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRadInv.cxx
+index 9e51629d0..b12549c6e 100644
+--- a/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRadInv.cxx
++++ b/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRadInv.cxx
+@@ -28,6 +28,7 @@ BlendFunc_ConstRadInv::BlendFunc_ConstRadInv(const occ::handle<Adaptor3d_Surface
+     : surf1(S1),
+       surf2(S2),
+       curv(C),
++      myIsBall(true),
+       ray1(0.0),
+       ray2(0.0),
+       choix(0),
+@@ -35,6 +36,15 @@ BlendFunc_ConstRadInv::BlendFunc_ConstRadInv(const occ::handle<Adaptor3d_Surface
+ {
+ }
+ 
++//=================================================================================================
++
++void BlendFunc_ConstRadInv::SetRollingBall(const bool theIsBall)
++{
++  myIsBall = theIsBall;
++}
++
++//=================================================================================================
++
+ void BlendFunc_ConstRadInv::Set(const double R, const int Choix)
+ 
+ {
+@@ -152,8 +162,191 @@ bool BlendFunc_ConstRadInv::IsSolution(const math_Vector& Sol, const double Tol)
+          && valsol(2) * valsol(2) + valsol(3) * valsol(3) + valsol(4) * valsol(4) <= Tol * Tol;
+ }
+ 
++namespace
++{
++// The unit vector -N / |N| from a point of a surface of normal N towards the
++// center of a ball of negative radius, and its derivative along theDN.
++gp_Vec UnitNormal(const gp_Vec& theN)
++{
++  const double aM = theN.Magnitude();
++  return aM > Eps ? -theN / aM : -theN;
++}
++
++gp_Vec DUnitNormal(const gp_Vec& theN, const gp_Vec& theDN)
++{
++  const double aM2 = theN.SquareMagnitude();
++  if (aM2 < Eps * Eps)
++  {
++    return -theDN;
++  }
++  return -(theDN - theN * (theN.Dot(theDN) / aM2)) / std::sqrt(aM2);
++}
++
++// The context of the function.
++struct ConstRadInvData
++{
++  const occ::handle<Adaptor3d_Surface>& surf1;
++  const occ::handle<Adaptor3d_Surface>& surf2;
++  const occ::handle<Adaptor3d_Curve>&   curv;
++  const occ::handle<Adaptor2d_Curve2d>& csurf;
++  double                                ray1;
++  double                                ray2;
++  bool                                  first;
++};
++
++//=================================================================================================
++
++bool BallValue(const ConstRadInvData& theCtx, const math_Vector& X, math_Vector& F)
++{
++  // As BlendFunc_ConstRad for a rolling ball: the center of the
++  // ball touching the surfaces is on their normals.
++  gp_Pnt ptcur;
++  gp_Vec d1cur;
++  theCtx.curv->D1(X(2), ptcur, d1cur);
++
++  const gp_Vec nplan = d1cur.Normalized();
++  const double theD  = -(nplan.XYZ().Dot(ptcur.XYZ()));
++
++  const gp_Pnt2d pt2d(theCtx.csurf->Value(X(1)));
++
++  gp_Pnt pts1, pts2;
++  gp_Vec d1u1, d1v1, d1u2, d1v2;
++  if (theCtx.first)
++  {
++    theCtx.surf1->D1(pt2d.X(), pt2d.Y(), pts1, d1u1, d1v1);
++    theCtx.surf2->D1(X(3), X(4), pts2, d1u2, d1v2);
++  }
++  else
++  {
++    theCtx.surf1->D1(X(3), X(4), pts1, d1u1, d1v1);
++    theCtx.surf2->D1(pt2d.X(), pt2d.Y(), pts2, d1u2, d1v2);
++  }
++
++  gp_Vec ns1 = d1u1.Crossed(d1v1);
++  if (ns1.Magnitude() < Eps)
++  {
++    BlendFunc::ComputeNormal(theCtx.surf1, theCtx.first ? pt2d : gp_Pnt2d(X(3), X(4)), ns1);
++  }
++  gp_Vec ns2 = d1u2.Crossed(d1v2);
++  if (ns2.Magnitude() < Eps)
++  {
++    BlendFunc::ComputeNormal(theCtx.surf2, theCtx.first ? gp_Pnt2d(X(3), X(4)) : pt2d, ns2);
++  }
++  const gp_Vec aMid((pts1.XYZ() + pts2.XYZ()) / 2.);
++  F(1) = nplan.XYZ().Dot(aMid.XYZ()) + theD;
++
++  gp_Vec resul;
++  resul.SetLinearForm(theCtx.ray1, UnitNormal(ns1), gp_Vec(pts2, pts1));
++  resul.Subtract(theCtx.ray2 * UnitNormal(ns2));
++  F(2) = resul.X();
++  F(3) = resul.Y();
++  F(4) = resul.Z();
++  return true;
++}
++
++//=================================================================================================
++
++bool BallValues(const ConstRadInvData& theCtx, const math_Vector& X, math_Vector& F, math_Matrix& D)
++{
++  gp_Pnt ptcur;
++  gp_Vec d1cur, d2cur;
++  theCtx.curv->D2(X(2), ptcur, d1cur, d2cur);
++  const double normtgcur = d1cur.Magnitude();
++  const gp_Vec nplan     = d1cur.Normalized();
++  const double theD      = -(nplan.XYZ().Dot(ptcur.XYZ()));
++  gp_Vec       dnplan;
++  dnplan.SetLinearForm(-nplan.Dot(d2cur), nplan, d2cur);
++  dnplan /= normtgcur;
++
++  gp_Pnt2d p2d;
++  gp_Vec2d v2d;
++  theCtx.csurf->D1(X(1), p2d, v2d);
++
++  gp_Pnt pts1, pts2;
++  gp_Vec d1u1, d1v1, d1u2, d1v2, d2u1, d2v1, d2uv1, d2u2, d2v2, d2uv2;
++  if (theCtx.first)
++  {
++    theCtx.surf1->D2(p2d.X(), p2d.Y(), pts1, d1u1, d1v1, d2u1, d2v1, d2uv1);
++    theCtx.surf2->D2(X(3), X(4), pts2, d1u2, d1v2, d2u2, d2v2, d2uv2);
++  }
++  else
++  {
++    theCtx.surf1->D2(X(3), X(4), pts1, d1u1, d1v1, d2u1, d2v1, d2uv1);
++    theCtx.surf2->D2(p2d.X(), p2d.Y(), pts2, d1u2, d1v2, d2u2, d2v2, d2uv2);
++  }
++
++  gp_Vec ns1 = d1u1.Crossed(d1v1);
++  if (ns1.Magnitude() < Eps)
++  {
++    BlendFunc::ComputeNormal(theCtx.surf1, theCtx.first ? p2d : gp_Pnt2d(X(3), X(4)), ns1);
++  }
++  gp_Vec ns2 = d1u2.Crossed(d1v2);
++  if (ns2.Magnitude() < Eps)
++  {
++    BlendFunc::ComputeNormal(theCtx.surf2, theCtx.first ? gp_Pnt2d(X(3), X(4)) : p2d, ns2);
++  }
++  const gp_Vec aMid((pts1.XYZ() + pts2.XYZ()) / 2.);
++  F(1) = nplan.XYZ().Dot(aMid.XYZ()) + theD;
++
++  gp_Vec resul;
++  resul.SetLinearForm(theCtx.ray1, UnitNormal(ns1), gp_Vec(pts2, pts1));
++  resul.Subtract(theCtx.ray2 * UnitNormal(ns2));
++  F(2) = resul.X();
++  F(3) = resul.Y();
++  F(4) = resul.Z();
++
++  // Derivatives of the equations by the parameters on the two surfaces.
++  const gp_Vec dns1u = d2u1.Crossed(d1v1).Added(d1u1.Crossed(d2uv1));
++  const gp_Vec dns1v = d2uv1.Crossed(d1v1).Added(d1u1.Crossed(d2v1));
++  const gp_Vec dns2u = d2u2.Crossed(d1v2).Added(d1u2.Crossed(d2uv2));
++  const gp_Vec dns2v = d2uv2.Crossed(d1v2).Added(d1u2.Crossed(d2v2));
++  const gp_Vec dNu1 = DUnitNormal(ns1, dns1u), dNv1 = DUnitNormal(ns1, dns1v);
++  const gp_Vec dNu2 = DUnitNormal(ns2, dns2u), dNv2 = DUnitNormal(ns2, dns2v);
++  gp_Vec       dEu1, dEv1, dEu2, dEv2;
++  dEu1.SetLinearForm(theCtx.ray1, dNu1, d1u1);
++  dEv1.SetLinearForm(theCtx.ray1, dNv1, d1v1);
++  dEu2.SetLinearForm(-theCtx.ray2, dNu2, -1., d1u2);
++  dEv2.SetLinearForm(-theCtx.ray2, dNv2, -1., d1v2);
++
++  // X(1) is the parameter on the curve on the surface (1 or 2), X(2) the
++  // parameter on the guide, X(3), X(4) the parameters on the other surface.
++  const gp_Vec& dEuc = theCtx.first ? dEu1 : dEu2;
++  const gp_Vec& dEvc = theCtx.first ? dEv1 : dEv2;
++  const gp_Vec& dEuo = theCtx.first ? dEu2 : dEu1;
++  const gp_Vec& dEvo = theCtx.first ? dEv2 : dEv1;
++  const gp_Vec& d1uc = theCtx.first ? d1u1 : d1u2;
++  const gp_Vec& d1vc = theCtx.first ? d1v1 : d1v2;
++  const gp_Vec& d1uo = theCtx.first ? d1u2 : d1u1;
++  const gp_Vec& d1vo = theCtx.first ? d1v2 : d1v1;
++
++  gp_Vec temp;
++  temp.SetLinearForm(v2d.X(), d1uc, v2d.Y(), d1vc);
++  D(1, 1) = nplan.Dot(temp) / 2.;
++  temp.SetXYZ(aMid.XYZ() - ptcur.XYZ());
++  D(1, 2) = dnplan.Dot(temp) - normtgcur;
++  D(1, 3) = nplan.Dot(d1uo) / 2.;
++  D(1, 4) = nplan.Dot(d1vo) / 2.;
++
++  temp.SetLinearForm(v2d.X(), dEuc, v2d.Y(), dEvc);
++  for (int i = 1; i <= 3; ++i)
++  {
++    D(i + 1, 1) = temp.Coord(i);
++    D(i + 1, 2) = 0.; // only the plane depends on the guide
++    D(i + 1, 3) = dEuo.Coord(i);
++    D(i + 1, 4) = dEvo.Coord(i);
++  }
++  return true;
++}
++} // namespace
++
++//=================================================================================================
++
+ bool BlendFunc_ConstRadInv::Value(const math_Vector& X, math_Vector& F)
+ {
++  if (myIsBall)
++  {
++    return BallValue({surf1, surf2, curv, csurf, ray1, ray2, first}, X, F);
++  }
+   gp_Pnt ptcur;
+   gp_Vec d1cur;
+   curv->D1(X(2), ptcur, d1cur);
+@@ -231,8 +424,15 @@ bool BlendFunc_ConstRadInv::Value(const math_Vector& X, math_Vector& F)
+   return true;
+ }
+ 
++//=================================================================================================
++
+ bool BlendFunc_ConstRadInv::Derivatives(const math_Vector& X, math_Matrix& D)
+ {
++  if (myIsBall)
++  {
++    math_Vector F(1, 4);
++    return BallValues({surf1, surf2, curv, csurf, ray1, ray2, first}, X, F, D);
++  }
+   gp_Vec   d1u1, d1v1, d1u2, d1v2;
+   gp_Vec   d2u1, d2v1, d2uv1, d2u2, d2v2, d2uv2;
+   gp_Vec   d1cur, d2cur;
+@@ -431,8 +631,14 @@ bool BlendFunc_ConstRadInv::Derivatives(const math_Vector& X, math_Matrix& D)
+   return true;
+ }
+ 
++//=================================================================================================
++
+ bool BlendFunc_ConstRadInv::Values(const math_Vector& X, math_Vector& F, math_Matrix& D)
+ {
++  if (myIsBall)
++  {
++    return BallValues({surf1, surf2, curv, csurf, ray1, ray2, first}, X, F, D);
++  }
+   gp_Vec   d1u1, d1v1, d1u2, d1v2, d1cur;
+   gp_Vec   d2u1, d2v1, d2uv1, d2u2, d2v2, d2uv2, d2cur;
+   gp_Vec   ns1, ns2, nplan, dnplan, ncrossns1, ncrossns2, resul1, resul2, temp;
+diff --git a/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRadInv.hxx b/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRadInv.hxx
+index 840822616..0892fb38d 100644
+--- a/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRadInv.hxx
++++ b/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRadInv.hxx
+@@ -64,11 +64,16 @@ public:
+ 
+   Standard_EXPORT void Set(const double R, const int Choix);
+ 
++  //! Chooses the section of the blend, as BlendFunc_ConstRad::SetRollingBall.
++  //! @param[in] theIsBall true for the circle of the rolling ball
++  Standard_EXPORT void SetRollingBall(const bool theIsBall);
++
+ private:
+   occ::handle<Adaptor3d_Surface> surf1;
+   occ::handle<Adaptor3d_Surface> surf2;
+   occ::handle<Adaptor3d_Curve>   curv;
+   occ::handle<Adaptor2d_Curve2d> csurf;
++  bool                           myIsBall;
+   double                         ray1;
+   double                         ray2;
+   int                            choix;
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
+index fff61e6f6..8815a650c 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
+@@ -40,6 +40,9 @@
+ #include <Standard_Integer.hxx>
+ #include <NCollection_Map.hxx>
+ #include <TopAbs_ShapeEnum.hxx>
++#include <BRepCheck_Analyzer.hxx>
++#include <ChFiDS_FilSpine.hxx>
++#include <NCollection_Sequence.hxx>
+ #include <TopExp.hxx>
+ #include <TopExp_Explorer.hxx>
+ #include <TopoDS.hxx>
+@@ -285,9 +288,101 @@ void ChFi3d_Builder::ExtentAnalyse()
+ 
+ //=================================================================================================
+ 
++// The greatest tolerance of the edges and vertices of theShape.
++static double MaxTolerance(const TopoDS_Shape& theShape)
++{
++  double aTol = 0.;
++  for (TopExp_Explorer anExp(theShape, TopAbs_EDGE); anExp.More(); anExp.Next())
++  {
++    aTol = std::max(aTol, BRep_Tool::Tolerance(TopoDS::Edge(anExp.Current())));
++  }
++  for (TopExp_Explorer anExp(theShape, TopAbs_VERTEX); anExp.More(); anExp.Next())
++  {
++    aTol = std::max(aTol, BRep_Tool::Tolerance(TopoDS::Vertex(anExp.Current())));
++  }
++  return aTol;
++}
++
++//=================================================================================================
++
+ void ChFi3d_Builder::Compute()
+ {
++  // The fillets of constant radius are the envelopes of a rolling
++  // ball. Where the corners or the ends of the fillets cannot
++  // follow them (the computation fails, or leaves gaps covered by
++  // the tolerances: a ball nesting in a fillet of its radius, a
++  // support face with a kink) the computation is done again with
++  // the sections in the planes normal to the guides, and the best
++  // result is kept.
++  // The contours as they are before a computation, which changes them (the
++  // states and the prolongations of the spines, stripes added at corners).
++  NCollection_Sequence<occ::handle<ChFiDS_Stripe>> aStripes, aStripeCopies;
++  NCollection_Sequence<occ::handle<ChFiDS_Spine>>  aSpineCopies;
++  for (NCollection_List<occ::handle<ChFiDS_Stripe>>::Iterator anIt(myListStripe); anIt.More();
++       anIt.Next())
++  {
++    const occ::handle<ChFiDS_Stripe>&  aStripe = anIt.Value();
++    const occ::handle<ChFiDS_FilSpine> aFilSpine =
++      occ::down_cast<ChFiDS_FilSpine>(aStripe->Spine());
++    aStripes.Append(aStripe);
++    aStripeCopies.Append(new ChFiDS_Stripe(*aStripe));
++    aSpineCopies.Append(aFilSpine.IsNull() ? occ::handle<ChFiDS_Spine>()
++                                           : new ChFiDS_FilSpine(*aFilSpine));
++  }
++  const auto aRestore = [&]() {
++    myListStripe.Clear();
++    for (int i = 1; i <= aStripes.Length(); ++i)
++    {
++      *aStripes(i) = *aStripeCopies(i);
++      *occ::down_cast<ChFiDS_FilSpine>(aStripes(i)->Spine()) =
++        *occ::down_cast<ChFiDS_FilSpine>(aSpineCopies(i));
++      myListStripe.Append(aStripes(i));
++    }
++    myCoup = new TopOpeBRepBuild_HBuilder(myCoup->BuildTool());
++  };
++
++  myIsBall     = true;
++  myIsBallUsed = false;
++  ComputeOnce();
++  if (!myIsBallUsed)
++  {
++    return;
++  }
++  for (int i = 1; i <= aSpineCopies.Length(); ++i)
++  {
++    if (aSpineCopies(i).IsNull())
++    {
++      return; // only the contours of fillets can be computed again
++    }
++  }
++  const double aTolBall = IsDone() && BRepCheck_Analyzer(myShapeResult).IsValid()
++                            ? MaxTolerance(myShapeResult)
++                            : RealLast();
++  if (aTolBall <= 10. * tolapp3d)
++  {
++    return;
++  }
++  myIsBall = false;
++  aRestore();
++  ComputeOnce();
++  const double aTolSection = IsDone() && BRepCheck_Analyzer(myShapeResult).IsValid()
++                               ? MaxTolerance(myShapeResult)
++                               : RealLast();
++  if (aTolSection < 0.5 * aTolBall || aTolBall == RealLast())
++  {
++    return;
++  }
++  myIsBall = true;
++  aRestore();
++  ComputeOnce();
++}
+ 
++//=================================================================================================
++
++void ChFi3d_Builder::ComputeOnce()
++{
++  // The stripes added by a previous computation are removed.
++  Reset();
+   UpdateTolesp();
+ 
+   if (myListStripe.IsEmpty())
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
+index 2f67b2cec..0c66f1281 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
+@@ -769,8 +769,17 @@ protected:
+   NCollection_DataMap<TopoDS_Shape, TopoDS_Shape, TopTools_ShapeMapHasher>          myEdgeFirstFace;
+   bool                                                                              done;
+   bool                                                                              hasresult;
++  //! The section of a fillet of constant radius computed by a walking: the
++  //! circle of the rolling ball (by default), or the circle in the plane
++  //! normal to the guide (BlendFunc_ConstRad::SetRollingBall).
++  bool myIsBall;
++  //! Set when such a fillet has been computed with the rolling ball.
++  mutable bool myIsBallUsed;
+ 
+ private:
++  //! The computation, with the current section of the fillets.
++  Standard_EXPORT void ComputeOnce();
++
+   Standard_EXPORT bool FaceTangency(const TopoDS_Edge&   E0,
+                                     const TopoDS_Edge&   E1,
+                                     const TopoDS_Vertex& V) const;
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_1.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_1.cxx
+index ee5a5f36e..056b6c224 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_1.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_1.cxx
+@@ -340,6 +340,8 @@ static TopOpeBRepDS_BuildTool mkbuildtool()
+ 
+ ChFi3d_Builder::ChFi3d_Builder(const TopoDS_Shape& S, const double Ta)
+     : done(false),
++      myIsBall(true),
++      myIsBallUsed(false),
+       myShape(S)
+ {
+   myDS   = new TopOpeBRepDS_HDataStructure();
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx
+index 15bbf7fe5..b74d8968e 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx
+@@ -576,8 +576,11 @@ bool ChFi3d_FilBuilder::SimulSurf(occ::handle<ChFiDS_SurfData>&           Data,
+   }
+   if (fsp->IsConstant())
+   {
+-    BRepBlend_ConstRad    Func(S1, S2, HGuide);
++    BRepBlend_ConstRad Func(S1, S2, HGuide);
++    Func.SetRollingBall(myIsBall);
++    myIsBallUsed = myIsBallUsed || myIsBall;
+     BRepBlend_ConstRadInv FInv(S1, S2, HGuide);
++    FInv.SetRollingBall(myIsBall);
+     Func.Set(fsp->Radius(), Choix);
+     FInv.Set(fsp->Radius(), Choix);
+     Func.Set(myShape);
+@@ -806,6 +809,7 @@ void ChFi3d_FilBuilder::SimulSurf(occ::handle<ChFiDS_SurfData>&           Data,
+     BRepBlend_SurfCurvConstRadInv  finvc(HS2, HC, HGuide);
+     BRepBlend_SurfPointConstRadInv finvp(HS2, HGuide);
+     BRepBlend_ConstRadInv          finv(HS2, HSref1, HGuide);
++    finv.SetRollingBall(myIsBall);
+     finv.Set(false, PCref1);
+ 
+     double rad        = fsp->Radius();
+@@ -1038,6 +1042,7 @@ void ChFi3d_FilBuilder::SimulSurf(occ::handle<ChFiDS_SurfData>&           Data,
+     BRepBlend_SurfCurvConstRadInv  finvc(HS1, HC, HGuide);
+     BRepBlend_SurfPointConstRadInv finvp(HS1, HGuide);
+     BRepBlend_ConstRadInv          finv(HS1, HSref2, HGuide);
++    finv.SetRollingBall(myIsBall);
+     finv.Set(false, PCref2);
+ 
+     double rad        = fsp->Radius();
+@@ -1491,6 +1496,8 @@ bool ChFi3d_FilBuilder::PerformFirstSection(const occ::handle<ChFiDS_Spine>&
+   if (fsp->IsConstant())
+   {
+     BRepBlend_ConstRad Func(S1, S2, HGuide);
++    Func.SetRollingBall(myIsBall);
++    myIsBallUsed = myIsBallUsed || myIsBall;
+     Func.Set(fsp->Radius(), Choix);
+     Func.Set(myShape);
+     BRepBlend_Walking TheWalk(S1, S2, I1, I2, HGuide);
+@@ -1691,8 +1698,11 @@ bool ChFi3d_FilBuilder::PerformSurf(NCollection_Sequence<occ::handle<ChFiDS_Surf
+   };
+   if (fsp->IsConstant())
+   {
+-    BRepBlend_ConstRad    Func(S1, S2, HGuide);
++    BRepBlend_ConstRad Func(S1, S2, HGuide);
++    Func.SetRollingBall(myIsBall);
++    myIsBallUsed = myIsBallUsed || myIsBall;
+     BRepBlend_ConstRadInv FInv(S1, S2, HGuide);
++    FInv.SetRollingBall(myIsBall);
+     Func.Set(fsp->Radius(), Choix);
+     FInv.Set(fsp->Radius(), Choix);
+     Func.Set(myShape);
+@@ -1843,6 +1853,7 @@ void ChFi3d_FilBuilder::PerformSurf(NCollection_Sequence<occ::handle<ChFiDS_Surf
+     BRepBlend_SurfCurvConstRadInv  finvc(HS2, HC, HGuide);
+     BRepBlend_SurfPointConstRadInv finvp(HS2, HGuide);
+     BRepBlend_ConstRadInv          finv(HS2, HSref1, HGuide);
++    finv.SetRollingBall(myIsBall);
+     finv.Set(false, PCref1);
+ 
+     double rad        = fsp->Radius();
+@@ -2016,6 +2027,7 @@ void ChFi3d_FilBuilder::PerformSurf(NCollection_Sequence<occ::handle<ChFiDS_Surf
+     BRepBlend_SurfCurvConstRadInv  finvc(HS1, HC, HGuide);
+     BRepBlend_SurfPointConstRadInv finvp(HS1, HGuide);
+     BRepBlend_ConstRadInv          finv(HS1, HSref2, HGuide);
++    finv.SetRollingBall(myIsBall);
+     finv.Set(false, PCref2);
+ 
+     double rad        = fsp->Radius();
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C3.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C3.cxx
+index fe4493d11..df03c86eb 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C3.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C3.cxx
+@@ -751,8 +751,11 @@ void ChFi3d_FilBuilder::PerformThreeCorner(const int Jndex)
+       if (std::abs(Rdeb - Rfin) <= tolapp3d)
+       {
+ 
+-        BRepBlend_ConstRad    func(Fac, Surf, cornerspine);
++        BRepBlend_ConstRad func(Fac, Surf, cornerspine);
++        func.SetRollingBall(myIsBall);
++        myIsBallUsed = myIsBallUsed || myIsBall;
+         BRepBlend_ConstRadInv finv(Fac, Surf, cornerspine);
++        finv.SetRollingBall(myIsBall);
+         func.Set(Rdeb, choix);
+         func.Set(myShape);
+         finv.Set(Rdeb, choix);
+diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+index 383bd475a..927f4769f 100644
+--- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
++++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+@@ -30,6 +30,11 @@
+ #include <BRepAdaptor_Curve.hxx>
+ #include <BRepAdaptor_Surface.hxx>
+ #include <BRepPrimAPI_MakeBox.hxx>
++#include <BRepPrimAPI_MakeCone.hxx>
++#include <BRepTools.hxx>
++#include <BRepTopAdaptor_FClass2d.hxx>
++#include <GeomAPI_ProjectPointOnSurf.hxx>
++#include <GeomLProp_SLProps.hxx>
+ #include <BRepPrimAPI_MakeHalfSpace.hxx>
+ #include <gp_Pln.hxx>
+ #include <BRepPrimAPI_MakeCylinder.hxx>
+@@ -1221,3 +1226,97 @@ TEST(BRepFilletAPI_MakeFilletTest, PocketCornerOnChamfer_ClosedByPlanarCap)
+   }
+   EXPECT_TRUE(hasCapSection);
+ }
++
++//=================================================================================================
++// Constant radius fillet as the envelope of a rolling ball
++
++// A quarter of a cone (FreeCAD and DRAW "pcone s 50 0 120 90"): the fillet of
++// the edge between the cone and a plane through its axis. Off that edge the
++// normals of the cone leave the plane normal to the edge, so a circle tangent
++// to the sections of the faces by that plane is not a ball touching them: it
++// missed the ball by 0.22 with a radius of 10. The fillet is the envelope of
++// the ball now: every point of it is at the radius from a center at the
++// radius from both faces.
++TEST(BRepFilletAPI_MakeFilletTest, ConstantRadius_FollowsRollingBall)
++{
++  const double       aR    = 10.0;
++  const TopoDS_Shape aCone = BRepPrimAPI_MakeCone(50.0, 0.0, 120.0, M_PI / 2.0).Shape();
++  NCollection_IndexedDataMap<TopoDS_Shape, NCollection_List<TopoDS_Shape>, TopTools_ShapeMapHasher>
++    anEF;
++  TopExp::MapShapesAndAncestors(aCone, TopAbs_EDGE, TopAbs_FACE, anEF);
++  TopoDS_Edge anEdge;
++  TopoDS_Face aConeFace, aPlaneFace;
++  for (int i = 1; i <= anEF.Extent() && anEdge.IsNull(); ++i)
++  {
++    const TopoDS_Edge& anE = TopoDS::Edge(anEF.FindKey(i));
++    if (BRep_Tool::Degenerated(anE) || anEF(i).Extent() != 2
++        || BRepAdaptor_Curve(anE).GetType() != GeomAbs_Line)
++    {
++      continue;
++    }
++    for (int k = 0; k < 2; ++k)
++    {
++      const TopoDS_Face aF1 = TopoDS::Face(k == 0 ? anEF(i).First() : anEF(i).Last());
++      const TopoDS_Face aF2 = TopoDS::Face(k == 0 ? anEF(i).Last() : anEF(i).First());
++      if (BRepAdaptor_Surface(aF1).GetType() == GeomAbs_Cone
++          && BRepAdaptor_Surface(aF2).GetType() == GeomAbs_Plane)
++      {
++        anEdge     = anE;
++        aConeFace  = aF1;
++        aPlaneFace = aF2;
++        break;
++      }
++    }
++  }
++  ASSERT_FALSE(anEdge.IsNull());
++
++  BRepFilletAPI_MakeFillet aFillet(aCone);
++  aFillet.Add(aR, anEdge);
++  aFillet.Build();
++  ASSERT_TRUE(aFillet.IsDone());
++  EXPECT_TRUE(BRepCheck_Analyzer(aFillet.Shape()).IsValid());
++
++  const occ::handle<Geom_Surface> aConeSurf  = BRep_Tool::Surface(aConeFace);
++  const occ::handle<Geom_Surface> aPlaneSurf = BRep_Tool::Surface(aPlaneFace);
++  int                             aNbFillets = 0;
++  for (TopExp_Explorer anExp(aFillet.Shape(), TopAbs_FACE); anExp.More(); anExp.Next())
++  {
++    const TopoDS_Face& aFace = TopoDS::Face(anExp.Current());
++    if (BRepAdaptor_Surface(aFace).GetType() != GeomAbs_BSplineSurface)
++    {
++      continue;
++    }
++    ++aNbFillets;
++    const occ::handle<Geom_Surface> aSurf = BRep_Tool::Surface(aFace);
++    double                          aU0, aU1, aV0, aV1;
++    BRepTools::UVBounds(aFace, aU0, aU1, aV0, aV1);
++    BRepTopAdaptor_FClass2d aClass(aFace, 1.e-9);
++    double                  aMaxErr = 0.0;
++    for (int i = 1; i < 10; ++i)
++    {
++      for (int j = 1; j < 10; ++j)
++      {
++        const double aU = aU0 + (aU1 - aU0) * i / 10.0, aV = aV0 + (aV1 - aV0) * j / 10.0;
++        if (aClass.Perform(gp_Pnt2d(aU, aV)) != TopAbs_IN)
++        {
++          continue;
++        }
++        GeomLProp_SLProps aProps(aSurf, aU, aV, 1, 1.e-9);
++        ASSERT_TRUE(aProps.IsNormalDefined());
++        double anErr = RealLast();
++        for (const double aSign : {-1.0, 1.0})
++        {
++          const gp_Pnt aCenter = aProps.Value().Translated(gp_Vec(aProps.Normal()) * (aSign * aR));
++          GeomAPI_ProjectPointOnSurf aToCone(aCenter, aConeSurf), aToPlane(aCenter, aPlaneSurf);
++          ASSERT_TRUE(aToCone.NbPoints() > 0 && aToPlane.NbPoints() > 0);
++          anErr = std::min(anErr,
++                           std::max(std::abs(aToCone.LowerDistance() - aR),
++                                    std::abs(aToPlane.LowerDistance() - aR)));
++        }
++        aMaxErr = std::max(aMaxErr, anErr);
++      }
++    }
++    EXPECT_LT(aMaxErr, 1.e-3);
++  }
++  EXPECT_EQ(aNbFillets, 1);
++}
+diff --git a/tests/blend/simple/C8 b/tests/blend/simple/C8
+index aec58a22b..3a6dfcc03 100644
+--- a/tests/blend/simple/C8
++++ b/tests/blend/simple/C8
+@@ -9,4 +9,4 @@ trotate s 0 0 0 0 0 1 90
+ explode s E
+ blend result s 10 s_7 10 s_2 10 s_4
+ 
+-checkprops result -s 9640.68
++checkprops result -s 9781.91
+diff --git a/tests/blend/simple/D1 b/tests/blend/simple/D1
+index 03ee7ed45..056b3e2f3 100644
+--- a/tests/blend/simple/D1
++++ b/tests/blend/simple/D1
+@@ -9,4 +9,4 @@ trotate s 0 0 0 0 0 1 270
+ explode s E
+ blend result s 10 s_3 10 s_2 10 s_5
+ 
+-checkprops result -s 9940.87
++checkprops result -s 10080.1
+diff --git a/tests/bugs/modalg_8/fillet_root_rolling_on_wall_fillet b/tests/bugs/modalg_8/fillet_root_rolling_on_wall_fillet
+index f8261e1f9..ec659ddea 100644
+--- a/tests/bugs/modalg_8/fillet_root_rolling_on_wall_fillet
++++ b/tests/bugs/modalg_8/fillet_root_rolling_on_wall_fillet
+@@ -16,4 +16,4 @@ blend result b 0.7 b_42
+ 
+ checkshape result
+ checkmaxtol result -ref 1.83e-4
+-checkprops result -v 8691.48 -s 3034.92
++checkprops result -v 8691.5 -s 3034.8
+diff --git a/tests/bugs/modalg_8/fillet_thread_convex_concave_corner b/tests/bugs/modalg_8/fillet_thread_convex_concave_corner
+index 97b429090..28199f3e6 100644
+--- a/tests/bugs/modalg_8/fillet_thread_convex_concave_corner
++++ b/tests/bugs/modalg_8/fillet_thread_convex_concave_corner
+@@ -13,5 +13,5 @@ explode b E
+ blend result b 1 b_6 1 b_7
+ 
+ checkshape result
+-checkmaxtol result -ref 1.06e-4
+-checkprops result -v 8681.03 -s 3081.65
++checkmaxtol result -ref 1.33e-4
++checkprops result -v 8681.03 -s 3081.64
+diff --git a/tests/bugs/modalg_8/fillet_thread_on_seam b/tests/bugs/modalg_8/fillet_thread_on_seam
+index 1294e44f4..6c6471f6d 100644
+--- a/tests/bugs/modalg_8/fillet_thread_on_seam
++++ b/tests/bugs/modalg_8/fillet_thread_on_seam
+@@ -13,5 +13,5 @@ explode b E
+ blend result b 1 b_7
+ 
+ checkshape result
+-checkmaxtol result -ref 1.06e-4
+-checkprops result -v 8680.59 -deps 1.e-5
++checkmaxtol result -ref 1.33e-4
++checkprops result -v 8680.58 -deps 1.e-5
+diff --git a/tests/bugs/modalg_8/fillet_wall_profile_corner_at_root b/tests/bugs/modalg_8/fillet_wall_profile_corner_at_root
+index e4c05570f..86aae38bf 100644
+--- a/tests/bugs/modalg_8/fillet_wall_profile_corner_at_root
++++ b/tests/bugs/modalg_8/fillet_wall_profile_corner_at_root
+@@ -15,5 +15,5 @@ explode b E
+ blend result b 1.2 b_95
+ 
+ checkshape result
+-checkmaxtol result -ref 2.44e-4
+-checkprops result -v 8708.12 -s 3016.4
++checkmaxtol result -ref 1.83e-4
++checkprops result -v 8708.11 -s 3016.39
+diff --git a/tests/bugs/modalg_8/fillet_wall_profile_cusp_ends b/tests/bugs/modalg_8/fillet_wall_profile_cusp_ends
+index 3d658310a..5669131fb 100644
+--- a/tests/bugs/modalg_8/fillet_wall_profile_cusp_ends
++++ b/tests/bugs/modalg_8/fillet_wall_profile_cusp_ends
+@@ -15,5 +15,5 @@ explode b E
+ blend result b 0.6 b_95
+ 
+ checkshape result
+-checkmaxtol result -ref 2.22e-4
+-checkprops result -v 8706.41 -s 3017.75
++checkmaxtol result -ref 1.83e-4
++checkprops result -v 8706.68 -s 3017.86
+diff --git a/tests/bugs/modalg_8/fillet_wall_profile_over_root b/tests/bugs/modalg_8/fillet_wall_profile_over_root
+index 9cdf863c0..a330c0e10 100644
+--- a/tests/bugs/modalg_8/fillet_wall_profile_over_root
++++ b/tests/bugs/modalg_8/fillet_wall_profile_over_root
+@@ -5,11 +5,11 @@ puts "============"
+ puts ""
+ 
+ # The fillet runs along the whole profile of the groove on its start wall.
+-# A ball of the radius of the fillet of the root barely fits into it: the
+-# walking goes back and forth on the wall there, the surfdata on the fillet
+-# of the root is twisted and the next one starts with a hook. The hook is
+-# left to the filling that rebuilds the twisted surfdata, its trace on the
+-# wall following the neighbors smoothly. Both ends are closed as in
++# A ball of the radius of the fillet of the root just fits into it: it stays
++# there touching the wall at one point, where the traces on the wall of the
++# fillets of the two flanks meet at a corner (as SolidWorks makes it, with a
++# sphere). The surfdata of the ball in the fillet of the root is twisted and
++# rebuilt by a filling which ends at that point. Both ends are closed as in
+ # fillet_wall_profile_cusp_ends.
+ restore [locate_data_file freecad_screw_wall_profile.brep] b
+ explode b E
+@@ -18,4 +18,4 @@ blend result b 1 b_95
+ 
+ checkshape result
+ checkmaxtol result -ref 1.83e-4
+-checkprops result -v 8707.45 -s 3016.81
++checkprops result -v 8707.58 -s 3016.86
+diff --git a/tests/bugs/modalg_8/fillet_wall_profile_smooth_at_root b/tests/bugs/modalg_8/fillet_wall_profile_smooth_at_root
+index 50330b531..7e106affa 100644
+--- a/tests/bugs/modalg_8/fillet_wall_profile_smooth_at_root
++++ b/tests/bugs/modalg_8/fillet_wall_profile_smooth_at_root
+@@ -4,11 +4,10 @@ puts "(FreeCAD screw: edges of the start wall, radius 0.8)"
+ puts "============"
+ puts ""
+ 
+-# Near the fillet of the root (radius 1) the walking keeps the center of the
+-# ball in the section plane and the surfdata after the one on the fillet of
+-# the root starts with a hook on the wall, a sharp bend where the tangency
+-# was lost. That start is left to a filling which replaces the surfdata on
+-# the fillet of the root, tangent to its neighbors and to both faces.
++# Near the fillet of the root (radius 1) the normals of the faces leave the
++# plane normal to the edge. A circle tangent to the sections of the faces by
++# that plane made a hook on the wall; the rolling ball follows the fillet of
++# the root smoothly, its trace on the wall is the one of SolidWorks.
+ restore [locate_data_file freecad_screw_wall_profile.brep] b
+ explode b E
+ 
+@@ -16,4 +15,4 @@ blend result b 0.8 b_95
+ 
+ checkshape result
+ checkmaxtol result -ref 1.83e-4
+-checkprops result -v 8707.03 -s 3017.3
++checkprops result -v 8707.04 -s 3017.32
+diff --git a/tests/bugs/modalg_8/fillet_wall_start_after_extension b/tests/bugs/modalg_8/fillet_wall_start_after_extension
+index 2a72d162c..9ec90a1c8 100644
+--- a/tests/bugs/modalg_8/fillet_wall_start_after_extension
++++ b/tests/bugs/modalg_8/fillet_wall_start_after_extension
+@@ -15,5 +15,5 @@ explode b E
+ blend result b 1 b_11
+ 
+ checkshape result
+-checkmaxtol result -ref 1.83e-4
++checkmaxtol result -ref 1.45e-4
+ checkprops result -v 8677.2 -s 3073.49
+-- 
+2.43.0
+

@@ -1,0 +1,264 @@
+From 0f81d9bf61b3822e36bf7e562ae9797ec5417239 Mon Sep 17 00:00:00 2001
+From: Kuzma30 <kuzemkoa@gmail.com>
+Date: Mon, 26 Oct 2026 10:09:17 +0200
+Subject: [PATCH 03/24] Modeling Algorithms - Use the builder angular tolerance
+ to count sharp edges at a corner
+
+At the end of a fillet, ChFi3d_NumberOfSharpEdges() decides how the corner
+is built (OneCorner for up to three sharp edges, IntersectionAtEnd for
+more). It treated an edge as smooth when ChFi3d::IsTangentFaces() found
+its faces within the fixed G1 tolerance of LocalAnalysis_SurfaceContinuity,
+0.1 rad (5.7 degrees). A real kink of a few degrees was therefore ignored.
+
+Example (FreeCAD issue 29234): a tapered shaft starting flush with the
+faces of a plate. At the root of the shaft the tapered faces meet the plate
+faces at 1.4 degrees, so the end vertex of each long shaft edge has four
+sharp edges but was treated as a corner of three. The OnSame corner then
+either failed (faulty vertex) or produced a self-intersecting wire on the
+tapered face.
+
+ChFi3d::IsTangentFaces() gets an optional angular tolerance (default
+unchanged), and the sharp edge count at a vertex uses the angular
+tolerance of the builder (1.e-2 by default, set by SetParams()). Other
+callers of IsTangentFaces() are not changed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
+---
+ .../TKFillet/ChFi3d/ChFi3d.cxx                |  5 +-
+ .../TKFillet/ChFi3d/ChFi3d.hxx                |  5 +-
+ .../TKFillet/ChFi3d/ChFi3d_Builder.cxx        |  4 +-
+ .../TKFillet/ChFi3d/ChFi3d_Builder_0.cxx      | 12 ++-
+ .../TKFillet/ChFi3d/ChFi3d_Builder_0.hxx      |  5 +-
+ .../GTests/BRepFilletAPI_MakeFillet_Test.cxx  | 76 +++++++++++++++++++
+ 6 files changed, 97 insertions(+), 10 deletions(-)
+
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d.cxx
+index e76af2939..01ad72849 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d.cxx
+@@ -160,7 +160,8 @@ ChFiDS_TypeOfConcavity ChFi3d::DefineConnectType(const TopoDS_Edge& E,
+ bool ChFi3d::IsTangentFaces(const TopoDS_Edge&  theEdge,
+                             const TopoDS_Face&  theFace1,
+                             const TopoDS_Face&  theFace2,
+-                            const GeomAbs_Shape theOrder)
++                            const GeomAbs_Shape theOrder,
++                            const double        theAngularTol)
+ {
+   if (theOrder == GeomAbs_G1 && BRep_Tool::Continuity(theEdge, theFace1, theFace2) != GeomAbs_C0)
+   {
+@@ -253,7 +254,7 @@ bool ChFi3d::IsTangentFaces(const TopoDS_Edge&  theEdge,
+     }
+ 
+     LocalAnalysis_SurfaceContinuity
+-      aCont(aC2d1, aC2d2, aPar, aSurf1, aSurf2, theOrder, 0.001, TolC0, 0.1, 0.1, 0.1);
++      aCont(aC2d1, aC2d2, aPar, aSurf1, aSurf2, theOrder, 0.001, TolC0, 0.1, 0.1, theAngularTol);
+     if (!aCont.IsDone())
+     {
+       if (theOrder == GeomAbs_C2 && aCont.StatusError() == LocalAnalysis_NullSecondDerivative)
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d.hxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d.hxx
+index cb156fb7a..1fe2ac574 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d.hxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d.hxx
+@@ -43,10 +43,13 @@ public:
+                                                                   const bool         CorrectPoint);
+ 
+   //! Returns true if theEdge between theFace1 and theFace2 is tangent
++  //! @param theAngularTol maximal angle in radians between the normals of
++  //!        the faces along the edge for them to be considered tangent.
+   Standard_EXPORT static bool IsTangentFaces(const TopoDS_Edge&  theEdge,
+                                              const TopoDS_Face&  theFace1,
+                                              const TopoDS_Face&  theFace2,
+-                                             const GeomAbs_Shape Order = GeomAbs_G1);
++                                             const GeomAbs_Shape Order         = GeomAbs_G1,
++                                             const double        theAngularTol = 0.1);
+ 
+   //! Returns Reversed in Or1 and(or) Or2 if
+   //! the concave edge defined by the interior of faces F1 and F2,
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
+index fd5405979..5c3d5db2c 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
+@@ -133,7 +133,7 @@ void ChFi3d_Builder::ExtentAnalyse()
+     nbs                      = myVDataMap(iv).Extent();
+     const TopoDS_Vertex& Vtx = myVDataMap.FindKey(iv);
+     // nbedges = ChFi3d_NumberOfEdges(Vtx, myVEMap);
+-    nbedges = ChFi3d_NumberOfSharpEdges(Vtx, myVEMap, myEFMap);
++    nbedges = ChFi3d_NumberOfSharpEdges(Vtx, myVEMap, myEFMap, angular);
+     switch (nbs)
+     {
+       case 1:
+@@ -652,7 +652,7 @@ void ChFi3d_Builder::PerformFilletOnVertex(const int Index)
+       if (BRep_Tool::Degenerated(cur)) nba--;
+     }
+     nba=nba/2;*/
+-  int nba = ChFi3d_NumberOfSharpEdges(Vtx, myVEMap, myEFMap);
++  int nba = ChFi3d_NumberOfSharpEdges(Vtx, myVEMap, myEFMap, angular);
+ 
+   if (nondegenere)
+   { // Normal processing
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
+index 5a3be39b0..af1688c68 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
+@@ -5764,7 +5764,10 @@ int ChFi3d_NbNotDegeneratedEdges(const TopoDS_Vertex& Vtx, const ChFiDS_Map& VEM
+ // purpose  : calculate the number of sharp edges of Map VEMap(Vtx)
+ // Attention the edges of junctions are taken into account twice
+ //=======================================================================
+-int ChFi3d_NbSharpEdges(const TopoDS_Vertex& Vtx, const ChFiDS_Map& VEMap, const ChFiDS_Map& EFMap)
++static int ChFi3d_NbSharpEdges(const TopoDS_Vertex& Vtx,
++                               const ChFiDS_Map&    VEMap,
++                               const ChFiDS_Map&    EFMap,
++                               const double         theAngTol)
+ {
+   NCollection_List<TopoDS_Shape>::Iterator ItE;
+   int                                      nba = VEMap(Vtx).Extent();
+@@ -5779,7 +5782,7 @@ int ChFi3d_NbSharpEdges(const TopoDS_Vertex& Vtx, const ChFiDS_Map& VEMap, const
+     {
+       TopoDS_Face F1, F2;
+       ChFi3d_conexfaces(cur, F1, F2, EFMap);
+-      if (!F2.IsNull() && ChFi3d::IsTangentFaces(cur, F1, F2, GeomAbs_G2))
++      if (!F2.IsNull() && ChFi3d::IsTangentFaces(cur, F1, F2, GeomAbs_G2, theAngTol))
+       {
+         nba--;
+       }
+@@ -5818,12 +5821,13 @@ int ChFi3d_NumberOfEdges(const TopoDS_Vertex& Vtx, const ChFiDS_Map& VEMap)
+ //=======================================================================
+ int ChFi3d_NumberOfSharpEdges(const TopoDS_Vertex& Vtx,
+                               const ChFiDS_Map&    VEMap,
+-                              const ChFiDS_Map&    EFmap)
++                              const ChFiDS_Map&    EFmap,
++                              const double         theAngTol)
+ {
+   int         nba;
+   bool        bordlibre;
+   TopoDS_Edge edgelibre1, edgelibre2;
+-  nba = ChFi3d_NbSharpEdges(Vtx, VEMap, EFmap);
++  nba = ChFi3d_NbSharpEdges(Vtx, VEMap, EFmap, theAngTol);
+   ChFi3d_ChercheBordsLibres(VEMap, Vtx, bordlibre, edgelibre1, edgelibre2);
+   if (bordlibre)
+   {
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
+index c07d9b054..e17ef189a 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
+@@ -528,6 +528,8 @@ void ChFi3d_ChercheBordsLibres(const ChFiDS_Map&    myVEMap,
+ int ChFi3d_NbNotDegeneratedEdges(const TopoDS_Vertex& Vtx, const ChFiDS_Map& VEMap);
+ int ChFi3d_NumberOfEdges(const TopoDS_Vertex& Vtx, const ChFiDS_Map& VEMap);
+ 
++//! Returns the number of sharp edges at the vertex. An edge counts as smooth
++//! when its faces are tangent within <theAngTol> radians.
+ //! @param[in] Vtx the vertex
+ //! @param[in] VEMap map of the edges of the vertices
+ //! @param[in] EFmap map of the faces of the edges
+@@ -535,7 +537,8 @@ int ChFi3d_NumberOfEdges(const TopoDS_Vertex& Vtx, const ChFiDS_Map& VEMap);
+ //! @return the number of sharp edges at the vertex
+ int ChFi3d_NumberOfSharpEdges(const TopoDS_Vertex& Vtx,
+                               const ChFiDS_Map&    VEMap,
+-                              const ChFiDS_Map&    EFmap);
++                              const ChFiDS_Map&    EFmap,
++                              const double         theAngTol);
+ 
+ void ChFi3d_cherche_vertex(const TopoDS_Edge& E1,
+                            const TopoDS_Edge& E2,
+diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+index b62bc5f12..8ff73561f 100644
+--- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
++++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+@@ -20,6 +20,8 @@
+ #include <BRepBuilderAPI_MakeFace.hxx>
+ #include <BRepBuilderAPI_MakePolygon.hxx>
+ #include <BRepBuilderAPI_MakeWire.hxx>
++#include <BRepBuilderAPI_MakeSolid.hxx>
++#include <BRepBuilderAPI_Sewing.hxx>
+ #include <BRepBuilderAPI_Transform.hxx>
+ #include <BRepCheck_Analyzer.hxx>
+ #include <BRepFilletAPI_MakeFillet.hxx>
+@@ -53,6 +55,8 @@
+ #include <TopoDS_Edge.hxx>
+ #include <TopoDS_Face.hxx>
+ #include <TopoDS_Shape.hxx>
++#include <TopoDS_Vertex.hxx>
++#include <TopoDS_Shell.hxx>
+ #include <TopoDS_Wire.hxx>
+ #include <gp_Ax2.hxx>
+ #include <gp_Dir.hxx>
+@@ -852,3 +856,75 @@ TEST(BRepFilletAPI_MakeFilletTest, CutTorusAlongSeams_ProducesValidShape)
+   // same as for a cut shifted off the seam by 0.001 (4.308 removed)
+   EXPECT_NEAR(aBefore.Mass() - anAfter.Mass(), 4.32, 0.05);
+ }
++
++// A plate with a tapered square shaft whose faces start flush with the faces
++// of the plate (FreeCAD issue 29234). At the root of the shaft the tapered
++// faces meet the plate faces at about 1.4 degrees. That kink was taken for a
++// tangency, so the end vertex of each long shaft edge looked like a corner of
++// three edges instead of four, and the fillet end could not be built.
++TEST(BRepFilletAPI_MakeFilletTest, TaperedShaftFlushWithPlate_ProducesValidShape)
++{
++  // planar frustum from the 5x5 square at x = 3 to the 4x4 square at x = 23
++  const gp_Pnt aP[8] = {gp_Pnt(3.0, -2.5, -2.5),
++                        gp_Pnt(3.0, 2.5, -2.5),
++                        gp_Pnt(3.0, 2.5, 2.5),
++                        gp_Pnt(3.0, -2.5, 2.5),
++                        gp_Pnt(23.0, -2.0, -2.0),
++                        gp_Pnt(23.0, 2.0, -2.0),
++                        gp_Pnt(23.0, 2.0, 2.0),
++                        gp_Pnt(23.0, -2.0, 2.0)};
++  const int    aQuads[6][4] =
++    {{0, 3, 2, 1}, {4, 5, 6, 7}, {0, 1, 5, 4}, {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}};
++  BRepBuilderAPI_Sewing aSewing;
++  for (const auto& aQuad : aQuads)
++  {
++    BRepBuilderAPI_MakePolygon aPoly(aP[aQuad[0]], aP[aQuad[1]], aP[aQuad[2]], aP[aQuad[3]], true);
++    aSewing.Add(BRepBuilderAPI_MakeFace(aPoly.Wire(), true).Face());
++  }
++  aSewing.Perform();
++  BRepBuilderAPI_MakeSolid aShaft(TopoDS::Shell(aSewing.SewedShape()));
++  ASSERT_TRUE(aShaft.IsDone());
++
++  // the plate is as thick as the root of the shaft
++  const TopoDS_Shape aPlate = BRepPrimAPI_MakeBox(gp_Pnt(0.0, -7.0, -2.5), 3.0, 14.0, 5.0).Shape();
++  BRepAlgoAPI_Fuse   aFuse(aPlate, aShaft.Solid());
++  ASSERT_TRUE(aFuse.IsDone());
++  ShapeUpgrade_UnifySameDomain aUnify(aFuse.Shape());
++  aUnify.Build();
++  const TopoDS_Shape& aShape = aUnify.Shape();
++
++  GProp_GProps aBefore;
++  BRepGProp::VolumeProperties(aShape, aBefore);
++
++  NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> anEdges;
++  TopExp::MapShapes(aShape, TopAbs_EDGE, anEdges);
++  int aNbEdges = 0;
++  for (int i = 1; i <= anEdges.Extent(); ++i)
++  {
++    const TopoDS_Edge& anEdge = TopoDS::Edge(anEdges(i));
++    GProp_GProps       aLength;
++    BRepGProp::LinearProperties(anEdge, aLength);
++    if (std::abs(aLength.Mass() - 20.0) > 0.1)
++    {
++      continue; // not a long edge of the shaft
++    }
++    ++aNbEdges;
++    BRepFilletAPI_MakeFillet aFillet(aShape);
++    aFillet.Add(1.0, anEdge);
++    aFillet.Build();
++    ASSERT_TRUE(aFillet.IsDone()) << "shaft edge " << aNbEdges;
++    const TopoDS_Shape& aResult = aFillet.Shape();
++    EXPECT_TRUE(BRepCheck_Analyzer(aResult).IsValid()) << "shaft edge " << aNbEdges;
++    double aMaxTol = 0.0;
++    for (TopExp_Explorer anExp(aResult, TopAbs_VERTEX); anExp.More(); anExp.Next())
++    {
++      aMaxTol = std::max(aMaxTol, BRep_Tool::Tolerance(TopoDS::Vertex(anExp.Current())));
++    }
++    EXPECT_LT(aMaxTol, 1.e-2) << "shaft edge " << aNbEdges;
++    GProp_GProps anAfter;
++    BRepGProp::VolumeProperties(aResult, anAfter);
++    // (1 - pi/4) * r^2 * length, the faces meet at almost 90 degrees
++    EXPECT_NEAR(aBefore.Mass() - anAfter.Mass(), 4.29, 0.01) << "shaft edge " << aNbEdges;
++  }
++  EXPECT_EQ(aNbEdges, 4);
++}
+-- 
+2.43.0
+

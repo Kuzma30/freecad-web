@@ -1,37 +1,31 @@
 diff --git a/adm/cmake/occt_defs_flags.cmake b/adm/cmake/occt_defs_flags.cmake
-index 3d989abc..57a194e4 100644
+index 87a7fd4c..ba413e44 100644
 --- a/adm/cmake/occt_defs_flags.cmake
 +++ b/adm/cmake/occt_defs_flags.cmake
-@@ -30,9 +30,16 @@ if (MSVC)
-   # suppress warning on using portable non-secure functions in favor of non-portable secure ones
+@@ -31,8 +31,13 @@ if (MSVC)
+   # prevent min() and max() macros from Windows.h
    add_definitions (-D_CRT_SECURE_NO_WARNINGS -D_CRT_NONSTDC_NO_DEPRECATE)
  else()
--  set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions -fPIC")
--  set (CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -fexceptions -fPIC")
--  add_definitions(-DOCC_CONVERT_SIGNALS)
-+  set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC")
-+  set (CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -fPIC")
+-  set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions")
+-  set (CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -fexceptions")
 +  if (NOT EMSCRIPTEN)
 +    # setjmp-based signal conversion + wasm-EH in one function makes LLVM emit
 +    # invalid wasm (br_table arity / catch-after-catch_all). No POSIX signals in
 +    # wasm anyway, so OCC_CATCH_SIGNALS becomes a no-op there.
 +    set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions")
 +    set (CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -fexceptions")
++  endif()
+   if (NOT CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
+     set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC")
+     set (CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -fPIC")
+@@ -45,7 +50,9 @@ else()
+     set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-elaborated-enum-base")
+     set (CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -Wno-elaborated-enum-base")
+   endif()
+-  add_definitions(-DOCC_CONVERT_SIGNALS)
++  if (NOT EMSCRIPTEN)
 +    add_definitions(-DOCC_CONVERT_SIGNALS)
 +  endif()
  endif()
  
  # enable structured exceptions for MSVC
-diff --git a/src/StdPrs/StdPrs_BRepFont.cxx b/src/StdPrs/StdPrs_BRepFont.cxx
-index ab2d9b3c..f073c26e 100644
---- a/src/StdPrs/StdPrs_BRepFont.cxx
-+++ b/src/StdPrs/StdPrs_BRepFont.cxx
-@@ -457,7 +457,7 @@ Standard_Boolean StdPrs_BRepFont::renderGlyph (const Standard_Utf32Char theChar,
-   for (short aContour = 0, aStartIndex = 0; aContour < anOutline->n_contours; ++aContour)
-   {
-     const FT_Vector* aPntList = &anOutline->points[aStartIndex];
--    const char* aTags      = &anOutline->tags[aStartIndex];
-+    const char* aTags      = (const char* )&anOutline->tags[aStartIndex];
-     const short anEndIndex = anOutline->contours[aContour];
-     const short aPntsNb    = (anEndIndex - aStartIndex) + 1;
-     aStartIndex = anEndIndex + 1;

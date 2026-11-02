@@ -34,14 +34,14 @@ echo "  GSL:          $(ls "$gsl/include/gsl" | wc -l) headers"
 ond="$tree/src/3rdParty/OndselSolver"
 if [ ! -e "$ond/CMakeLists.txt" ]; then
   mkdir -p "$ond"
-  curl -fsSL -o /tmp/ondsel.tar.gz https://github.com/Ondsel-Development/OndselSolver/archive/refs/heads/main.tar.gz
+  curl -fsSL -o /tmp/ondsel.tar.gz https://github.com/Ondsel-Development/OndselSolver/archive/4be80eef02a3486cda0d78f3ccbb308d207a9639.tar.gz
   tar xzf /tmp/ondsel.tar.gz -C "$ond" --strip-components=1
 fi
 [ -e "$ond/CMakeLists.txt" ] || { echo "::error::OndselSolver missing -- BUILD_ASSEMBLY needs it"; exit 1; }
 echo "  OndselSolver: present"
 
 adm="$tree/src/Mod/AddonManager"
-adm_sha=937b6877239dc78ef59eeefe8099e5f14243eda1
+adm_sha=745c1b1ebc8bc684439210c5fa237d2c6287153b   # FreeCAD main 66644dee
 if [ ! -e "$adm/AddonManager.py" ]; then
   mkdir -p "$adm"
   curl -fsSL -o /tmp/addonmgr.tar.gz "https://codeload.github.com/FreeCAD/AddonManager/tar.gz/$adm_sha"

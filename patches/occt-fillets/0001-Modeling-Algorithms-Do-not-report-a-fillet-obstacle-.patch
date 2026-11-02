@@ -1,0 +1,136 @@
+From 7c06e177b1b562cb1c99741d9c95ab93eaf415df Mon Sep 17 00:00:00 2001
+From: Kuzma30 <kuzemkoa@gmail.com>
+Date: Mon, 26 Oct 2026 10:09:17 +0200
+Subject: [PATCH 01/24] Modeling Algorithms - Do not report a fillet obstacle
+ without its curve
+
+When the fillet walking reaches a face boundary, ChFi3d_Builder::StartSol
+looks for the obstacle edge on the neighbouring face. It set c1obstacle and
+allocated the restriction adaptor before that search, so when the edge was
+not found it returned with c1obstacle still true and an uninitialized
+BRepAdaptor_Curve2d. PerformSetOfSurfOnElSpine then started a
+surface-restriction blend on that adaptor and crashed in
+Geom2dAdaptor_Curve::EvalD1.
+
+The adaptor is now created only once the edge is found, and c1obstacle is
+reset when it is not, so the caller takes the same path as for an arc
+without a neighbouring face.
+
+The path became reachable with the hatching changes of #1449: filleting
+the rim of a square hole that crosses the rounded edges of a box crashed,
+while before it failed cleanly. Added a GTest for that case.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
+---
+ .../TKFillet/ChFi3d/ChFi3d_Builder_0.hxx      |  5 ++
+ .../TKFillet/ChFi3d/ChFi3d_Builder_2.cxx      |  8 ++--
+ .../GTests/BRepFilletAPI_MakeFillet_Test.cxx  | 46 +++++++++++++++++++
+ 3 files changed, 56 insertions(+), 3 deletions(-)
+
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
+index 49848b5f5..c07d9b054 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
+@@ -528,6 +528,11 @@ void ChFi3d_ChercheBordsLibres(const ChFiDS_Map&    myVEMap,
+ int ChFi3d_NbNotDegeneratedEdges(const TopoDS_Vertex& Vtx, const ChFiDS_Map& VEMap);
+ int ChFi3d_NumberOfEdges(const TopoDS_Vertex& Vtx, const ChFiDS_Map& VEMap);
+ 
++//! @param[in] Vtx the vertex
++//! @param[in] VEMap map of the edges of the vertices
++//! @param[in] EFmap map of the faces of the edges
++//! @param[in] theAngTol angular tolerance of the tangency of faces
++//! @return the number of sharp edges at the vertex
+ int ChFi3d_NumberOfSharpEdges(const TopoDS_Vertex& Vtx,
+                               const ChFiDS_Map&    VEMap,
+                               const ChFiDS_Map&    EFmap);
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
+index 9a6c5801a..4d553d4bc 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
+@@ -1526,8 +1526,7 @@ bool ChFi3d_Builder::StartSol(
+         }
+         HS->Initialize(Fv);
+         HSref->Initialize(F);
+-        W  = aCommonPoint.ParameterOnArc();
+-        HC = new BRepAdaptor_Curve2d();
++        W = aCommonPoint.ParameterOnArc();
+         TopoDS_Edge newedge;
+         TopoDS_Face newface = Fv;
+         newface.Orientation(TopAbs_FORWARD);
+@@ -1542,7 +1541,7 @@ bool ChFi3d_Builder::StartSol(
+ 
+         if (!newedge.IsNull())
+         {
+-          HC->Initialize(newedge, Fv);
++          HC   = new BRepAdaptor_Curve2d(newedge, Fv);
+           pons = HC->Value(W);
+           HCref->Initialize(anArcEdge, F);
+           if (aCommonPoint.IsVertex())
+@@ -1557,6 +1556,9 @@ bool ChFi3d_Builder::StartSol(
+         }
+         else
+         {
++          // The obstacle edge is not found on the neighbouring face: it cannot be
++          // used as a restriction, so do not report an obstacle without its curve.
++          c1obstacle = false;
+           prepareDefaultReturn();
+           return false;
+         }
+diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+index fc663e3cd..aed8e00bd 100644
+--- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
++++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+@@ -766,3 +766,49 @@ TEST(BRepFilletAPI_MakeFilletTest, OCC426_RevolveFuseUnifyFillet)
+   BRepGProp::SurfaceProperties(aResult, aResultProps);
+   EXPECT_NEAR(aResultProps.Mass(), 7507.61, 7507.61 * 0.001) << "Surface area mismatch";
+ }
++
++// A square hole slightly wider than the flat top of a box with rounded edges:
++// its rim runs across the blend faces. Filleting the rim used to crash in
++// BRepBlend_SurfRstConstRad, because ChFi3d_Builder::StartSol reported an
++// obstacle whose restriction curve was never initialized.
++TEST(BRepFilletAPI_MakeFilletTest, SquareHoleAcrossRoundedEdges_SucceedsWithoutCrash)
++{
++  const TopoDS_Shape       aBox = BRepPrimAPI_MakeBox(20.0, 20.0, 20.0).Shape();
++  BRepFilletAPI_MakeFillet aRound(aBox);
++  for (TopExp_Explorer anExp(aBox, TopAbs_EDGE); anExp.More(); anExp.Next())
++  {
++    aRound.Add(3.0, TopoDS::Edge(anExp.Current()));
++  }
++  aRound.Build();
++  ASSERT_TRUE(aRound.IsDone());
++
++  const TopoDS_Shape aTool = BRepPrimAPI_MakeBox(gp_Pnt(2.0, 2.0, 12.0), 16.0, 16.0, 10.0).Shape();
++  BRepAlgoAPI_Cut    aCut(aRound.Shape(), aTool);
++  ASSERT_TRUE(aCut.IsDone());
++  const TopoDS_Shape& aHoled = aCut.Shape();
++
++  // the edges on the four walls of the hole, above its bottom
++  BRepFilletAPI_MakeFillet                                      aFillet(aHoled);
++  NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> anEdges;
++  TopExp::MapShapes(aHoled, TopAbs_EDGE, anEdges);
++  for (int i = 1; i <= anEdges.Extent(); ++i)
++  {
++    const TopoDS_Edge& anEdge = TopoDS::Edge(anEdges(i));
++    GProp_GProps       aProps;
++    BRepGProp::LinearProperties(anEdge, aProps);
++    const gp_Pnt aMid = aProps.CentreOfMass();
++    if (aMid.Z() > 12.0
++        && (std::abs(aMid.X() - 2.0) < 1.e-6 || std::abs(aMid.X() - 18.0) < 1.e-6
++            || std::abs(aMid.Y() - 2.0) < 1.e-6 || std::abs(aMid.Y() - 18.0) < 1.e-6))
++    {
++      aFillet.Add(1.0, anEdge);
++    }
++  }
++  ASSERT_GT(aFillet.NbContours(), 0);
++
++  EXPECT_NO_THROW(aFillet.Build());
++  if (aFillet.IsDone())
++  {
++    EXPECT_TRUE(BRepCheck_Analyzer(aFillet.Shape()).IsValid());
++  }
++}
+-- 
+2.43.0
+

@@ -1,8 +1,9 @@
-# The FreeCAD release freecad.patch is rebased onto, and the only version it is
-# known to apply to. deps/src/freecad is gitignored, so nothing else in this
-# repository records which upstream tree the port targets -- the same class of
-# uncaptured build-machine state that hid the three force-included headers.
+# The FreeCAD tree freecad.patch is rebased onto, and the only one it is known to apply
+# to: a commit of FreeCAD main (2026-11-01). deps/src/freecad is gitignored, so nothing
+# else in this repository records which upstream tree the port targets.
 #
-# patches/apply.sh reads this and refuses to patch a tree that reports a
-# different PACKAGE_VERSION, rather than fuzzily applying to the wrong source.
-1.1.3
+# patches/apply.sh reads this and refuses to patch a tree whose recorded commit
+# (deps/src/freecad/.fcweb-freecad-commit, written by the fetch) is a different one,
+# rather than fuzzily applying to the wrong source. A release tag (e.g. 1.1.3) is still
+# accepted here; it is then checked against version.json / CMakeLists.txt as before.
+66644dee63d3d260f1e0b9a8517d1a13631e903f

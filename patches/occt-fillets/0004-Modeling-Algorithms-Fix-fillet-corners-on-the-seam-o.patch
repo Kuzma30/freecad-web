@@ -1,0 +1,230 @@
+From a6f10140ff34a0196307691874f3c2b3a2e08696 Mon Sep 17 00:00:00 2001
+From: Kuzma30 <kuzemkoa@gmail.com>
+Date: Mon, 26 Oct 2026 10:09:17 +0200
+Subject: [PATCH 04/24] Modeling Algorithms - Fix fillet corners on the seam of
+ a periodic face
+
+PerformOneCorner extends the edge Arcprol across the opposite face Fop.
+When Arcprol lies on the seam and Fop uses it only once (a thread cut
+along a cylinder, FreeCAD issue 32486), the pcurve was taken from the
+side of the period that is not in Fop. Take the pcurve of the occurrence
+in Fop.
+
+The intersection curve built there may start or end on the seam, or run
+along it. A point at an end of the curve no longer splits it (this threw
+in Geom_TrimmedCurve), and a parallel extrema result, which has no
+points, is no longer read (this crashed).
+
+With the OnSame state, the curve of the fillet on the opposite face is
+intersected with the extended face at the end. When the fillet stops on
+the seam and the seam lies in that face, the crossing is the end point of
+the curve. It was found slightly outside the range and rejected, and the
+corner failed. A crossing within the curve resolution of the range is now
+accepted and clamped.
+
+The fillet of the thread rim is built for all radii from 0.3 to 2 mm.
+Test bugs/modalg_8/fillet_thread_on_seam needs data file
+freecad32486_thread.brep.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
+---
+ .../TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx     | 57 +++++++++++++------
+ .../GTests/BRepFilletAPI_MakeFillet_Test.cxx  | 44 ++++++++++++++
+ tests/bugs/modalg_8/fillet_thread_on_seam     | 17 ++++++
+ 3 files changed, 100 insertions(+), 18 deletions(-)
+ create mode 100644 tests/bugs/modalg_8/fillet_thread_on_seam
+
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
+index 2db55cb59..6e724a562 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
+@@ -200,6 +200,9 @@ static bool Update(const occ::handle<Adaptor3d_Surface>& fb,
+     int    nbp = Intersection.NbPoints(), i, isol = 0, isolbis = 0;
+     double dist    = Precision::Infinite();
+     double distbis = Precision::Infinite();
++    // The crossing may fall on an end of the curve, e.g. where the
++    // interference stops on the seam that lies in the face at end.
++    const double aTolW = ct->Resolution(Precision::Confusion());
+     for (i = 1; i <= nbp; i++)
+     {
+       w = Intersection.Point(i).W();
+@@ -207,7 +210,7 @@ static bool Update(const occ::handle<Adaptor3d_Surface>& fb,
+       {
+         w = recadre(w, wop, isfirst, uf, ul);
+       }
+-      if (uf <= w && ul >= w && std::abs(w - wop) < dist)
++      if (uf - aTolW <= w && ul + aTolW >= w && std::abs(w - wop) < dist)
+       {
+         isol = i;
+         dist = std::abs(w - wop);
+@@ -241,6 +244,10 @@ static bool Update(const occ::handle<Adaptor3d_Surface>& fb,
+       {
+         w = ElCLib::InPeriod(w, uf, ul);
+       }
++      else
++      {
++        w = std::min(std::max(w, uf), ul);
++      }
+     }
+     else
+     {
+@@ -1001,7 +1008,8 @@ void ChFi3d_Builder::PerformOneCorner(const int Index, const bool thePrepareOnSa
+       GeomAdaptor_Curve              cur1(Ctrim->BasisCurve());
+       GeomAdaptor_Curve              cur2(Cc);
+       Extrema_ExtCC                  extCC(cur1, cur2);
+-      if (extCC.IsDone() && extCC.NbExt() != 0)
++      // A curve running along the seam gives a parallel result without points.
++      if (extCC.IsDone() && !extCC.IsParallel() && extCC.NbExt() != 0)
+       {
+         int    imin     = 0;
+         double distmin2 = RealLast();
+@@ -1445,7 +1453,9 @@ void ChFi3d_Builder::PerformOneCorner(const int Index, const bool thePrepareOnSa
+ #endif
+     const ChFiDS_FaceInterference& Fiop = Fd->Interference(IFopArc);
+     gp_Pnt2d                       pop1, pop2, pv1, pv2;
+-    Hc = BRep_Tool::CurveOnSurface(Arcprol, Fop, Ubid, Ubid);
++    // Arcprol may be a seam-type edge that Fop uses only once (a body cut along
++    // the seam). Take the pcurve of the occurrence that is really in Fop.
++    Hc = BRep_Tool::CurveOnSurface(TopoDS::Edge(Arcprol.Oriented(OArcprolop)), Fop, Ubid, Ubid);
+     if (Hc.IsNull())
+     {
+       throw Standard_ConstructionError("Failed to get p-curve of edge");
+@@ -1509,25 +1519,35 @@ void ChFi3d_Builder::PerformOneCorner(const int Index, const bool thePrepareOnSa
+       BRepLib_MakeEdge  Bedge(zob3d);
+       TopoDS_Edge       edg = Bedge.Edge();
+       BRepExtrema_ExtCC extCC(edgecouture, edg);
+-      if (extCC.IsDone() && extCC.NbExt() != 0)
++      // A curve running along the seam gives a parallel result without points.
++      if (extCC.IsDone() && !extCC.IsParallel() && extCC.NbExt() != 0)
+       {
+         for (int i = 1; i <= extCC.NbExt() && !intcouture; i++)
+         {
+-          if (extCC.SquareDistance(i) <= 1.e-8)
++          if (extCC.SquareDistance(i) > 1.e-8)
+           {
+-            par1                  = extCC.ParameterOnE1(i);
+-            par2                  = extCC.ParameterOnE2(i);
+-            gp_Pnt             P1 = extCC.PointOnE1(i);
+-            TopOpeBRepDS_Point tpoint(P1, 1.e-4);
+-            indpt      = DStr.AddPoint(tpoint);
+-            intcouture = true;
+-            curv1      = new Geom_TrimmedCurve(zob3d, Udeb, par2);
+-            curv2      = new Geom_TrimmedCurve(zob3d, par2, Ufin);
+-            TopOpeBRepDS_Curve tcurv1(curv1, tolreached);
+-            TopOpeBRepDS_Curve tcurv2(curv2, tolreached);
+-            Icurv1 = DStr.AddCurve(tcurv1);
+-            Icurv2 = DStr.AddCurve(tcurv2);
++            continue;
++          }
++          // The curve may start or end on the seam, e.g. when Arcprol is the
++          // seam edge itself. Such a point does not split the curve.
++          const gp_Pnt aPOnCurve = extCC.PointOnE2(i);
++          if (aPOnCurve.Distance(zob3d->Value(Udeb)) <= Precision::Confusion()
++              || aPOnCurve.Distance(zob3d->Value(Ufin)) <= Precision::Confusion())
++          {
++            continue;
+           }
++          par1                  = extCC.ParameterOnE1(i);
++          par2                  = extCC.ParameterOnE2(i);
++          gp_Pnt             P1 = extCC.PointOnE1(i);
++          TopOpeBRepDS_Point tpoint(P1, 1.e-4);
++          indpt      = DStr.AddPoint(tpoint);
++          intcouture = true;
++          curv1      = new Geom_TrimmedCurve(zob3d, Udeb, par2);
++          curv2      = new Geom_TrimmedCurve(zob3d, par2, Ufin);
++          TopOpeBRepDS_Curve tcurv1(curv1, tolreached);
++          TopOpeBRepDS_Curve tcurv2(curv2, tolreached);
++          Icurv1 = DStr.AddCurve(tcurv1);
++          Icurv2 = DStr.AddCurve(tcurv2);
+         }
+       }
+     }
+@@ -5070,7 +5090,8 @@ void ChFi3d_Builder::IntersectMoreCorner(const int Index)
+       GeomAdaptor_Curve              cur1(Ctrim->BasisCurve());
+       GeomAdaptor_Curve              cur2(Cc);
+       Extrema_ExtCC                  extCC(cur1, cur2);
+-      if (extCC.IsDone() && extCC.NbExt() != 0)
++      // A curve running along the seam gives a parallel result without points.
++      if (extCC.IsDone() && !extCC.IsParallel() && extCC.NbExt() != 0)
+       {
+         int    imin     = 0;
+         double dist2min = RealLast();
+diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+index 8ff73561f..0a48404ea 100644
+--- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
++++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+@@ -928,3 +928,47 @@ TEST(BRepFilletAPI_MakeFilletTest, TaperedShaftFlushWithPlate_ProducesValidShape
+   }
+   EXPECT_EQ(aNbEdges, 4);
+ }
++
++//=================================================================================================
++// Fillet whose corner lies on the seam of a cylinder
++
++// A groove turned into a cylinder from the seam over a quarter turn. Its end
++// wall lies in the plane of the seam, so the fillet of the rim ends at a
++// corner whose intersection curve runs along the seam. ChFi3d_Builder
++// read the extrema points of that parallel case and crashed.
++TEST(BRepFilletAPI_MakeFilletTest, GrooveEndingOnCylinderSeam_SucceedsWithoutCrash)
++{
++  const TopoDS_Shape         aCylinder = BRepPrimAPI_MakeCylinder(8.0, 10.0).Shape();
++  BRepBuilderAPI_MakePolygon aProfile(gp_Pnt(6.0, 0.0, 4.0),
++                                      gp_Pnt(9.0, 0.0, 4.0),
++                                      gp_Pnt(9.0, 0.0, 6.0),
++                                      gp_Pnt(6.0, 0.0, 6.0),
++                                      true);
++  const TopoDS_Face          aFace = BRepBuilderAPI_MakeFace(aProfile.Wire(), true).Face();
++  const TopoDS_Shape         aGroove =
++    BRepPrimAPI_MakeRevol(aFace, gp_Ax1(gp::Origin(), gp::DZ()), M_PI / 2.0).Shape();
++  BRepAlgoAPI_Cut aCut(aCylinder, aGroove);
++  ASSERT_TRUE(aCut.IsDone());
++  const TopoDS_Shape& aShape = aCut.Shape();
++
++  // the upper rim of the groove on the cylinder
++  TopoDS_Edge                                                   aRim;
++  NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> anEdges;
++  TopExp::MapShapes(aShape, TopAbs_EDGE, anEdges);
++  for (int i = 1; i <= anEdges.Extent() && aRim.IsNull(); ++i)
++  {
++    const TopoDS_Edge& anEdge = TopoDS::Edge(anEdges(i));
++    GProp_GProps       aProps;
++    BRepGProp::LinearProperties(anEdge, aProps);
++    if (std::abs(aProps.Mass() - 4.0 * M_PI) < 1.e-6
++        && std::abs(aProps.CentreOfMass().Z() - 6.0) < 1.e-6)
++    {
++      aRim = anEdge;
++    }
++  }
++  ASSERT_FALSE(aRim.IsNull());
++
++  BRepFilletAPI_MakeFillet aFillet(aShape);
++  aFillet.Add(0.5, aRim);
++  EXPECT_NO_THROW(aFillet.Build());
++}
+diff --git a/tests/bugs/modalg_8/fillet_thread_on_seam b/tests/bugs/modalg_8/fillet_thread_on_seam
+new file mode 100644
+index 000000000..1294e44f4
+--- /dev/null
++++ b/tests/bugs/modalg_8/fillet_thread_on_seam
+@@ -0,0 +1,17 @@
++puts "============"
++puts "Modeling Algorithms - Fillet of a thread that starts and ends on the seam of a cylinder"
++puts "(FreeCAD issue 32486)"
++puts "============"
++puts ""
++
++# A cylinder with a V thread cut along a helix, from a PartDesign SubtractiveHelix.
++# The thread ends lie in the plane of the cylinder seam.
++restore [locate_data_file freecad32486_thread.brep] b
++explode b E
++
++# One turn of the outer rim of the thread.
++blend result b 1 b_7
++
++checkshape result
++checkmaxtol result -ref 1.06e-4
++checkprops result -v 8680.59 -deps 1.e-5
+-- 
+2.43.0
+

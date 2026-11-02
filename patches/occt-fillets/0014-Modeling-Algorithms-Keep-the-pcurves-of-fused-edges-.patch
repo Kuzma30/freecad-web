@@ -1,0 +1,239 @@
+From f7ae5e6d147f61e9e863cc96aa1d60f80e8ff348 Mon Sep 17 00:00:00 2001
+From: Kuzma30 <kuzemkoa@gmail.com>
+Date: Mon, 26 Oct 2026 10:09:17 +0200
+Subject: [PATCH 14/24] Modeling Algorithms - Keep the pcurves of fused edges
+ on the ranges of the edges
+
+BRepLib_FuseEdges::UpdatePCurve took a B-spline pcurve whole when it joined
+the pcurves of the edges to fuse, and kept the pcurve of the first edge
+whenever it was long enough for the new edge, wherever it started. A pcurve
+going beyond its edge then shifted the parameters of the fused pcurve.
+
+FreeCAD's refine merges two pieces of a fillet that have the same surface
+and fuses their traces: the fused edge of the screw of the previous commit
+deviated by 1.05 from its pcurve on the fillet, and the refined shape got a
+tolerance of 1.1.
+
+Each pcurve is now trimmed to the range of its edge before it is joined,
+and the pcurve of the first edge is kept only if it covers the range of
+the new edge from the start of the first edge.
+
+GTest BRepLib_FuseEdgesTest.PCurveLongerThanEdge_KeepsPCurveOnEdgeRange.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
+---
+ .../TKTopAlgo/BRepLib/BRepLib_FuseEdges.cxx   |  15 +-
+ .../GTests/BRepLib_FuseEdges_Test.cxx         | 152 ++++++++++++++++++
+ .../TKTopAlgo/GTests/FILES.cmake              |   1 +
+ 3 files changed, 165 insertions(+), 3 deletions(-)
+ create mode 100644 src/ModelingAlgorithms/TKTopAlgo/GTests/BRepLib_FuseEdges_Test.cxx
+
+diff --git a/src/ModelingAlgorithms/TKTopAlgo/BRepLib/BRepLib_FuseEdges.cxx b/src/ModelingAlgorithms/TKTopAlgo/BRepLib/BRepLib_FuseEdges.cxx
+index d3de01def..cc0100476 100644
+--- a/src/ModelingAlgorithms/TKTopAlgo/BRepLib/BRepLib_FuseEdges.cxx
++++ b/src/ModelingAlgorithms/TKTopAlgo/BRepLib/BRepLib_FuseEdges.cxx
+@@ -1138,10 +1138,18 @@ bool BRepLib_FuseEdges::UpdatePCurve(const TopoDS_Edge&                    theOl
+         double f, l;
+         f = Curv2d->FirstParameter();
+         l = Curv2d->LastParameter();
+-        if (l - f + 2. * Epsilon(l - f) < el - ef)
++        // The pcurve of the first edge is kept if it covers the range of the
++        // new edge from the start of the first edge (see the range below);
++        // being long enough is not enough.
++        const double aNeedF = theOldEdge.Orientation() == TopAbs_REVERSED ? cl - el + ef : cf;
++        const double aNeedL = theOldEdge.Orientation() == TopAbs_REVERSED ? cl : cf + el - ef;
++        if (aNeedF < f - Precision::PConfusion() || aNeedL > l + Precision::PConfusion())
+         {
++          // Each pcurve is taken on the range of its edge: a bounded curve may
++          // go beyond it (the edge is then only a part of it).
+           occ::handle<Geom2d_BoundedCurve> bcurve = occ::down_cast<Geom2d_BoundedCurve>(Curv2d);
+-          if (bcurve.IsNull())
++          if (bcurve.IsNull() || cf > f + Precision::PConfusion()
++              || cl < l - Precision::PConfusion())
+           {
+             bcurve = new Geom2d_TrimmedCurve(Curv2d, cf, cl);
+           }
+@@ -1154,7 +1162,8 @@ bool BRepLib_FuseEdges::UpdatePCurve(const TopoDS_Edge&                    theOl
+             double                    first, last;
+             occ::handle<Geom2d_Curve> C = BRep_Tool::CurveOnSurface(E, Surf, loc, first, last);
+             occ::handle<Geom2d_BoundedCurve> BC = occ::down_cast<Geom2d_BoundedCurve>(C);
+-            if (BC.IsNull())
++            if (BC.IsNull() || first > C->FirstParameter() + Precision::PConfusion()
++                || last < C->LastParameter() - Precision::PConfusion())
+             {
+               BC = new Geom2d_TrimmedCurve(C, first, last);
+             }
+diff --git a/src/ModelingAlgorithms/TKTopAlgo/GTests/BRepLib_FuseEdges_Test.cxx b/src/ModelingAlgorithms/TKTopAlgo/GTests/BRepLib_FuseEdges_Test.cxx
+new file mode 100644
+index 000000000..63b99e2af
+--- /dev/null
++++ b/src/ModelingAlgorithms/TKTopAlgo/GTests/BRepLib_FuseEdges_Test.cxx
+@@ -0,0 +1,152 @@
++// Copyright (c) 2026 OPEN CASCADE SAS
++//
++// This file is part of Open CASCADE Technology software library.
++//
++// This library is free software; you can redistribute it and/or modify it under
++// the terms of the GNU Lesser General Public License version 2.1 as published
++// by the Free Software Foundation, with special exception defined in the file
++// OCCT_LGPL_EXCEPTION.txt. Consult the file LICENSE_LGPL_21.txt included in OCCT
++// distribution for complete text of the license and disclaimer of any warranty.
++//
++// Alternatively, this file may be used under the terms of Open CASCADE
++// commercial license or contractual agreement.
++
++#include <BRepBuilderAPI_MakeEdge.hxx>
++#include <BRepBuilderAPI_MakeFace.hxx>
++#include <BRepBuilderAPI_MakeVertex.hxx>
++#include <BRepBuilderAPI_MakeWire.hxx>
++#include <BRepCheck_Analyzer.hxx>
++#include <BRepLib_FuseEdges.hxx>
++#include <BRep_Builder.hxx>
++#include <BRep_Tool.hxx>
++#include <Geom2d_BSplineCurve.hxx>
++#include <Geom2d_Curve.hxx>
++#include <Geom_BSplineCurve.hxx>
++#include <Geom_Plane.hxx>
++#include <NCollection_Array1.hxx>
++#include <TopExp.hxx>
++#include <TopExp_Explorer.hxx>
++#include <TopoDS.hxx>
++#include <TopoDS_Edge.hxx>
++#include <TopoDS_Face.hxx>
++#include <TopoDS_Vertex.hxx>
++#include <Precision.hxx>
++#include <gp_Pln.hxx>
++#include <gp_Pnt2d.hxx>
++
++#include <algorithm>
++
++#include <gtest/gtest.h>
++
++namespace
++{
++// A straight B-spline of degree 1 from theP1 at theT1 to theP2 at theT2.
++occ::handle<Geom_BSplineCurve> makeLine3d(const gp_Pnt& theP1,
++                                          const gp_Pnt& theP2,
++                                          const double  theT1,
++                                          const double  theT2)
++{
++  NCollection_Array1<gp_Pnt> aPoles(1, 2);
++  aPoles(1) = theP1;
++  aPoles(2) = theP2;
++  NCollection_Array1<double> aKnots(1, 2);
++  aKnots(1) = theT1;
++  aKnots(2) = theT2;
++  NCollection_Array1<int> aMults(1, 2);
++  aMults.Init(2);
++  return new Geom_BSplineCurve(aPoles, aKnots, aMults, 1);
++}
++
++occ::handle<Geom2d_BSplineCurve> makeLine2d(const gp_Pnt2d& theP1,
++                                            const gp_Pnt2d& theP2,
++                                            const double    theT1,
++                                            const double    theT2)
++{
++  NCollection_Array1<gp_Pnt2d> aPoles(1, 2);
++  aPoles(1) = theP1;
++  aPoles(2) = theP2;
++  NCollection_Array1<double> aKnots(1, 2);
++  aKnots(1) = theT1;
++  aKnots(2) = theT2;
++  NCollection_Array1<int> aMults(1, 2);
++  aMults.Init(2);
++  return new Geom2d_BSplineCurve(aPoles, aKnots, aMults, 1);
++}
++} // namespace
++
++// Two edges on one B-spline curve, consecutive on a face, are fused. The
++// pcurve of the first one is a B-spline that goes beyond the edge: only the
++// part on the edge may be joined to the pcurve of the second one. Joining
++// the whole curve shifted the parameters of the fused pcurve (the case of
++// a fillet split in two pieces, merged by FreeCAD's refine).
++TEST(BRepLib_FuseEdgesTest, PCurveLongerThanEdge_KeepsPCurveOnEdgeRange)
++{
++  occ::handle<Geom_Plane> aPlane = new Geom_Plane(gp_Pln());
++  // x = t along the bottom side, t in [-1, 2]; the edges are [0, 1] and [1, 2].
++  occ::handle<Geom_BSplineCurve> aCurve =
++    makeLine3d(gp_Pnt(-1., 0., 0.), gp_Pnt(2., 0., 0.), -1., 2.);
++  // The pcurve of the first edge starts at t = -1, the one of the second at t = 1.
++  occ::handle<Geom2d_BSplineCurve> aPc1 = makeLine2d(gp_Pnt2d(-1., 0.), gp_Pnt2d(1., 0.), -1., 1.);
++  occ::handle<Geom2d_BSplineCurve> aPc2 = makeLine2d(gp_Pnt2d(1., 0.), gp_Pnt2d(2., 0.), 1., 2.);
++
++  const TopoDS_Vertex aV0 = BRepBuilderAPI_MakeVertex(gp_Pnt(0., 0., 0.));
++  const TopoDS_Vertex aV1 = BRepBuilderAPI_MakeVertex(gp_Pnt(1., 0., 0.));
++  const TopoDS_Vertex aV2 = BRepBuilderAPI_MakeVertex(gp_Pnt(2., 0., 0.));
++  const TopoDS_Vertex aV3 = BRepBuilderAPI_MakeVertex(gp_Pnt(2., 1., 0.));
++  const TopoDS_Vertex aV4 = BRepBuilderAPI_MakeVertex(gp_Pnt(0., 1., 0.));
++
++  BRep_Builder aBB;
++  TopoDS_Edge  anE1 = BRepBuilderAPI_MakeEdge(aCurve, aV0, aV1, 0., 1.);
++  TopoDS_Edge  anE2 = BRepBuilderAPI_MakeEdge(aCurve, aV1, aV2, 1., 2.);
++  aBB.UpdateEdge(anE1, aPc1, aPlane, TopLoc_Location(), Precision::Confusion());
++  aBB.UpdateEdge(anE2, aPc2, aPlane, TopLoc_Location(), Precision::Confusion());
++
++  BRepBuilderAPI_MakeWire aMW;
++  aMW.Add(anE1);
++  aMW.Add(anE2);
++  aMW.Add(BRepBuilderAPI_MakeEdge(aV2, aV3));
++  aMW.Add(BRepBuilderAPI_MakeEdge(aV3, aV4));
++  aMW.Add(BRepBuilderAPI_MakeEdge(aV4, aV0));
++  ASSERT_TRUE(aMW.IsDone());
++  const TopoDS_Face aFace = BRepBuilderAPI_MakeFace(aPlane, aMW.Wire());
++  ASSERT_TRUE(BRepCheck_Analyzer(aFace).IsValid());
++
++  BRepLib_FuseEdges  aFuse(aFace);
++  const TopoDS_Shape aResult = aFuse.Shape();
++  ASSERT_FALSE(aResult.IsNull());
++  int aNbEdges = 0;
++  for (TopExp_Explorer anExp(aResult, TopAbs_EDGE); anExp.More(); anExp.Next())
++  {
++    ++aNbEdges;
++  }
++  EXPECT_EQ(aNbEdges, 4);
++  EXPECT_TRUE(BRepCheck_Analyzer(aResult).IsValid());
++
++  // The fused edge: its pcurve follows its 3D curve.
++  const TopoDS_Face aNewFace = TopoDS::Face(TopExp_Explorer(aResult, TopAbs_FACE).Current());
++  bool              isFound  = false;
++  for (TopExp_Explorer anExp(aNewFace, TopAbs_EDGE); anExp.More(); anExp.Next())
++  {
++    const TopoDS_Edge&            anE = TopoDS::Edge(anExp.Current());
++    double                        aF, aL;
++    const occ::handle<Geom_Curve> aC3d = BRep_Tool::Curve(anE, aF, aL);
++    if (aC3d.IsNull() || aC3d->Value(aF).Distance(aC3d->Value(aL)) < 1.5)
++    {
++      continue;
++    }
++    isFound = true;
++    double                          aPF, aPL;
++    const occ::handle<Geom2d_Curve> aPc = BRep_Tool::CurveOnSurface(anE, aNewFace, aPF, aPL);
++    ASSERT_FALSE(aPc.IsNull());
++    double aDev = 0.;
++    for (int i = 0; i <= 20; ++i)
++    {
++      const double   aT  = aF + (aL - aF) * i / 20.;
++      const gp_Pnt2d aUV = aPc->Value(aT);
++      aDev = std::max(aDev, aC3d->Value(aT).Distance(aPlane->Value(aUV.X(), aUV.Y())));
++    }
++    EXPECT_LT(aDev, 1.e-7);
++    EXPECT_LT(BRep_Tool::Tolerance(anE), 1.e-4);
++  }
++  EXPECT_TRUE(isFound);
++}
+diff --git a/src/ModelingAlgorithms/TKTopAlgo/GTests/FILES.cmake b/src/ModelingAlgorithms/TKTopAlgo/GTests/FILES.cmake
+index 61f8e4c25..3a629d6a1 100644
+--- a/src/ModelingAlgorithms/TKTopAlgo/GTests/FILES.cmake
++++ b/src/ModelingAlgorithms/TKTopAlgo/GTests/FILES.cmake
+@@ -15,6 +15,7 @@ set(OCCT_TKTopAlgo_GTests_FILES
+   BRepExtrema_ShapeProximity_Test.cxx
+   BRepBndLib_Test.cxx
+   BRepGProp_Test.cxx
++  BRepLib_FuseEdges_Test.cxx
+   BRepLib_MakeWire_Test.cxx
+   BRepOffsetAPI_ThruSections_Test.cxx
+   BRepTopAdaptor_FClass2d_Test.cxx
+-- 
+2.43.0
+

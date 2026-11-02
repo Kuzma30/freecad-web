@@ -1,0 +1,785 @@
+From 407529a26dd1ba7b385cf0d46cf7a7f5e82b87fd Mon Sep 17 00:00:00 2001
+From: Kuzma30 <kuzemkoa@gmail.com>
+Date: Mon, 26 Oct 2026 15:21:44 +0200
+Subject: [PATCH 16/24] Modeling Algorithms - Build a still rolling ball as a
+ sphere
+
+A ball of the radius of a concave fillet it rolls into (the start wall of
+a thread over the fillet of its root) stays still there: its contact on
+the other face does not move, the walked trace on that face is a point and
+the approximation of the walking fails, so the whole contour fell back to
+the section model. SolidWorks makes that part of the fillet a sphere.
+
+- ChFi3d_SphereData builds a surfdata on the sphere of the ball, with its
+  pole at the still contact and the trace on the other face along the
+  longitude, so that the meridians through its ends are the sections of
+  the neighbours. It refuses a trace that is not on the sphere (within
+  max(10 tolapp3d, R/1000)).
+- ChFi3d_FilBuilder::PerformSurf, in rolling ball mode, builds such a
+  surfdata when the approximation fails on a walking whose contact on one
+  face does not move, twisted on that side.
+- PerformSetOfKGen rebuilds a twisted surfdata ending at a point on one
+  side as the sphere instead of a filling, in rolling ball mode for a
+  constant radius, when its trace on the other side is on the sphere.
+- CornerOnPrevious looks for the crossing of the traces past the first
+  fifth of the trace before (was its second half): a ball too large for
+  the fillet of the root makes a swallowtail on the wall whose trace after
+  crosses the one before far back on it. The fillet of the wall then
+  builds up to radius 2 (was 1.83), with the small triangle of the wall
+  that SolidWorks leaves.
+
+With the fillets of the crests of radius 2 (as SolidWorks made them), the
+fillet of the wall of radius 1 has the sphere of SolidWorks (same center,
+the deviation of its faces drops from 0.016 to 1e-5), radius 2 builds with
+the triangle of the wall of SolidWorks.
+
+Tests: bugs/modalg_8 fillet_wall_profile_sphere_at_root and
+fillet_wall_profile_ball_does_not_pass_root (new data file
+freecad_screw_wall_profile_crest2.brep); comment of
+fillet_wall_profile_over_root updated (the fillet of the root there is
+0.0024 off the sphere: still a filling).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
+---
+ .../TKFillet/ChFi3d/ChFi3d_Builder_0.cxx      | 149 +++++++++++++
+ .../TKFillet/ChFi3d/ChFi3d_Builder_0.hxx      |  34 +++
+ .../TKFillet/ChFi3d/ChFi3d_Builder_2.cxx      | 177 +++++++++++-----
+ .../TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx     | 195 ++++++++++++++++++
+ ...illet_wall_profile_ball_does_not_pass_root |  19 ++
+ .../modalg_8/fillet_wall_profile_over_root    |   8 +-
+ .../fillet_wall_profile_sphere_at_root        |  36 ++++
+ 7 files changed, 564 insertions(+), 54 deletions(-)
+ create mode 100644 tests/bugs/modalg_8/fillet_wall_profile_ball_does_not_pass_root
+ create mode 100644 tests/bugs/modalg_8/fillet_wall_profile_sphere_at_root
+
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
+index c5a44456e..67274d18f 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
+@@ -56,6 +56,13 @@
+ #include <GeomLProp_CLProps.hxx>
+ #include <Geom_Ellipse.hxx>
+ #include <Geom_Line.hxx>
++#include <Geom_SphericalSurface.hxx>
++#include <Geom2dAPI_Interpolate.hxx>
++#include <GeomAPI_Interpolate.hxx>
++#include <NCollection_HArray1.hxx>
++#include <TopOpeBRepDS_Curve.hxx>
++#include <TopOpeBRepDS_Surface.hxx>
++#include <gp_Ax3.hxx>
+ #include <Geom_RectangularTrimmedSurface.hxx>
+ #include <IntAna_QuadQuadGeo.hxx>
+ #include <IntCurveSurface_HInter.hxx>
+@@ -6112,3 +6119,145 @@ bool ChFi3d_OrientAsNeighbour(const occ::handle<Geom_Surface>& theS,
+   theOr = aN.Dot(aNRef) > 0. ? theRefOr : TopAbs::Reverse(theRefOr);
+   return true;
+ }
++
++//=================================================================================================
++
++bool ChFi3d_SphereData(TopOpeBRepDS_DataStructure&           theDS,
++                       const occ::handle<ChFiDS_SurfData>&   theData,
++                       const gp_Pnt&                         theApex,
++                       const gp_Vec&                         theApexNormal,
++                       const double                          theR,
++                       const int                             theApexSide,
++                       const occ::handle<Adaptor3d_Surface>& theS,
++                       const occ::handle<Geom2d_Curve>&      thePC,
++                       const double                          theFirst,
++                       const double                          theLast,
++                       const double                          theTol3d)
++{
++  if (thePC.IsNull() || theR <= Precision::Confusion() || theLast - theFirst <= 0.
++      || theApexNormal.Magnitude() < Precision::Confusion())
++  {
++    return false;
++  }
++  const int                  aNb = 40;
++  NCollection_Array1<gp_Pnt> aPnts(0, aNb);
++  NCollection_Array1<double> aPars(0, aNb);
++  for (int i = 0; i <= aNb; ++i)
++  {
++    aPars(i)           = theFirst + (theLast - theFirst) * i / aNb;
++    const gp_Pnt2d aUV = thePC->Value(aPars(i));
++    aPnts(i)           = theS->Value(aUV.X(), aUV.Y());
++  }
++  // The center is on the normal to the face at the apex, towards the trace.
++  gp_Vec aN = theApexNormal.Normalized();
++  if (gp_Vec(theApex, aPnts(aNb / 2)).Dot(aN) < 0.)
++  {
++    aN.Reverse();
++  }
++  const gp_Pnt aC   = theApex.Translated(theR * aN);
++  double       aDev = 0.;
++  for (int i = 0; i <= aNb; ++i)
++  {
++    aDev = std::max(aDev, std::abs(aC.Distance(aPnts(i)) - theR));
++  }
++  if (aDev > std::max(10. * theTol3d, 1.e-3 * theR))
++  {
++    return false;
++  }
++
++  // The pole of the sphere (v = -pi/2 on the side 1, pi/2 on the side 2) is
++  // the apex, the origin of the longitude is in the middle of the trace.
++  const gp_Dir aZ = theApexSide == 1 ? gp_Dir(aN) : gp_Dir(aN.Reversed());
++  gp_Vec       aX(aC, aPnts(aNb / 2));
++  aX -= aX.Dot(gp_Vec(aZ)) * gp_Vec(aZ);
++  if (aX.Magnitude() < 1.e-3 * theR)
++  {
++    return false;
++  }
++  gp_Ax3     anAx(aC, aZ, gp_Dir(aX));
++  const auto aParams = [&](const gp_Pnt& theP) {
++    double aU, aV;
++    ElSLib::SphereParameters(anAx, theR, theP, aU, aV);
++    return gp_Pnt2d(aU > M_PI ? aU - 2. * M_PI : aU, aV);
++  };
++  // The longitude grows along the trace.
++  if (aParams(aPnts(aNb)).X() < aParams(aPnts(0)).X())
++  {
++    anAx.YReverse();
++  }
++  occ::handle<NCollection_HArray1<gp_Pnt2d>> aUVs   = new NCollection_HArray1<gp_Pnt2d>(1, aNb + 1);
++  occ::handle<NCollection_HArray1<gp_Pnt>>   aXYZs  = new NCollection_HArray1<gp_Pnt>(1, aNb + 1);
++  occ::handle<NCollection_HArray1<double>>   aTs    = new NCollection_HArray1<double>(1, aNb + 1);
++  double                                     aUPrev = -M_PI;
++  for (int i = 0; i <= aNb; ++i)
++  {
++    const gp_Pnt2d aUV = aParams(aPnts(i));
++    if (aUV.X() <= aUPrev || std::abs(aUV.Y()) > 0.5 * M_PI - 1.e-3)
++    {
++      return false;
++    }
++    aUPrev = aUV.X();
++    aUVs->SetValue(i + 1, aUV);
++    aXYZs->SetValue(i + 1, aPnts(i));
++    aTs->SetValue(i + 1, aPars(i));
++  }
++  Geom2dAPI_Interpolate anInt2d(aUVs, aTs, false, Precision::PConfusion());
++  anInt2d.Perform();
++  GeomAPI_Interpolate anInt3d(aXYZs, aTs, false, Precision::Confusion());
++  anInt3d.Perform();
++  if (!anInt2d.IsDone() || !anInt3d.IsDone())
++  {
++    return false;
++  }
++  const occ::handle<Geom2d_Curve>          aPCOnSph(anInt2d.Curve());
++  const occ::handle<Geom_Curve>            aCrv(anInt3d.Curve());
++  const occ::handle<Geom_SphericalSurface> aSph = new Geom_SphericalSurface(anAx, theR);
++  double                                   aTol = 0.;
++  for (int i = 0; i <= 4 * aNb; ++i)
++  {
++    const double   aT  = theFirst + (theLast - theFirst) * i / (4 * aNb);
++    const gp_Pnt2d aUV = thePC->Value(aT);
++    const gp_Pnt2d aSt = aPCOnSph->Value(aT);
++    const gp_Pnt   aP  = aCrv->Value(aT);
++    aTol               = std::max(aTol, aP.Distance(theS->Value(aUV.X(), aUV.Y())));
++    aTol               = std::max(aTol, aP.Distance(aSph->Value(aSt.X(), aSt.Y())));
++  }
++  aTol = std::max(1.5 * aTol, Precision::Confusion());
++
++  theData->ChangeSurf(theDS.AddSurface(TopOpeBRepDS_Surface(aSph, theTol3d)));
++  const int    aTrSide = 3 - theApexSide;
++  const double aVPole  = theApexSide == 1 ? -0.5 * M_PI : 0.5 * M_PI;
++  const gp_Pnt aPole   = aSph->Value(0., aVPole);
++  theData->ChangeVertex(true, theApexSide).SetPoint(aPole);
++  theData->ChangeVertex(false, theApexSide).SetPoint(aPole);
++  theData->ChangeVertex(true, aTrSide).SetPoint(aCrv->Value(theFirst));
++  theData->ChangeVertex(false, aTrSide).SetPoint(aCrv->Value(theLast));
++
++  // The apex side: the pole, from the first meridian to the last one.
++  NCollection_Array1<gp_Pnt2d> aPolePoles(1, 2);
++  aPolePoles(1) = gp_Pnt2d(aPCOnSph->Value(theFirst).X(), aVPole);
++  aPolePoles(2) = gp_Pnt2d(aPCOnSph->Value(theLast).X(), aVPole);
++  NCollection_Array1<double> aKnots(1, 2);
++  aKnots(1) = theFirst;
++  aKnots(2) = theLast;
++  NCollection_Array1<int> aMults(1, 2);
++  aMults.Init(2);
++  const occ::handle<Geom2d_Curve> aPCPole = new Geom2d_BSplineCurve(aPolePoles, aKnots, aMults, 1);
++  ChFiDS_FaceInterference&        aFiPole = theData->ChangeInterference(theApexSide);
++  aFiPole.SetFirstParameter(theFirst);
++  aFiPole.SetLastParameter(theLast);
++  aFiPole.SetInterference(theDS.AddCurve(TopOpeBRepDS_Curve(occ::handle<Geom_Curve>(), aTol)),
++                          TopAbs_FORWARD,
++                          occ::handle<Geom2d_Curve>(),
++                          aPCPole);
++
++  // The trace side.
++  ChFiDS_FaceInterference& aFi = theData->ChangeInterference(aTrSide);
++  aFi.SetFirstParameter(theFirst);
++  aFi.SetLastParameter(theLast);
++  aFi.SetInterference(theDS.AddCurve(TopOpeBRepDS_Curve(aCrv, aTol)),
++                      TopAbs_FORWARD,
++                      new Geom2d_TrimmedCurve(thePC, theFirst, theLast),
++                      aPCOnSph);
++  return true;
++}
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
+index 54a6476e1..d41f2bfb1 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
+@@ -576,4 +576,38 @@ bool ChFi3d_OrientAsNeighbour(const occ::handle<Geom_Surface>& theS,
+                               const TopAbs_Orientation         theRefOr,
+                               TopAbs_Orientation&              theOr);
+ 
++//! Builds <theData> as a part of the sphere of radius <theR> of a ball which
++//! stays still: its contact on the side <theApexSide> is the point <theApex>
++//! of a face of normal <theApexNormal>, the one on the other side is the
++//! trace <thePC>, between the parameters <theFirst> and <theLast>, on <theS>.
++//! The pole of the sphere is the apex, the trace goes along the longitude,
++//! so that the meridians through its ends are the sections of the ball.
++//! The interferences take the parameters of <thePC>, their transitions and
++//! the orientation of <theData> are left to the caller.
++//! Returns false, with <theData> unchanged, if the trace is not on the
++//! sphere within max(10 * <theTol3d>, R / 1000).
++//! @param[in,out] theDS data structure receiving the surface
++//! @param[in,out] theData surfdata to build
++//! @param[in] theApex point of contact of the ball on the apex side
++//! @param[in] theApexNormal normal of the face at the apex
++//! @param[in] theR radius of the ball
++//! @param[in] theApexSide side (1 or 2) of the apex
++//! @param[in] theS surface of the trace
++//! @param[in] thePC trace on theS
++//! @param[in] theFirst first parameter of the trace
++//! @param[in] theLast last parameter of the trace
++//! @param[in] theTol3d 3D tolerance
++//! @return false if the trace is not on the sphere
++bool ChFi3d_SphereData(TopOpeBRepDS_DataStructure&           theDS,
++                       const occ::handle<ChFiDS_SurfData>&   theData,
++                       const gp_Pnt&                         theApex,
++                       const gp_Vec&                         theApexNormal,
++                       const double                          theR,
++                       const int                             theApexSide,
++                       const occ::handle<Adaptor3d_Surface>& theS,
++                       const occ::handle<Geom2d_Curve>&      thePC,
++                       const double                          theFirst,
++                       const double                          theLast,
++                       const double                          theTol3d);
++
+ #endif
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
+index d0ffc5aa7..e4145c359 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
+@@ -32,6 +32,7 @@
+ #include <ChFiDS_CommonPoint.hxx>
+ #include <ChFiDS_ElSpine.hxx>
+ #include <ChFiDS_ErrorStatus.hxx>
++#include <ChFiDS_FilSpine.hxx>
+ #include <ChFiDS_FaceInterference.hxx>
+ #include <ChFiDS_SurfData.hxx>
+ #include <NCollection_Sequence.hxx>
+@@ -3832,7 +3833,7 @@ static bool CornerOnPrevious(const occ::handle<ChFiDS_SurfData>& thePrev,
+                              double&                             theWNextOut)
+ {
+   // The parameter theW on the trace on side theSide of thePrev
+-  // (in its second half) where the trace of theNext, extended back
++  // (past its first fifth) where the trace of theNext, extended back
+   // straight from the parameter theWNext in the parameters of the
+   // face, meets it; theWNextOut, the parameter on the trace of
+   // theNext where it starts then (at the crossing, if the trace
+@@ -3860,7 +3861,7 @@ static bool CornerOnPrevious(const occ::handle<ChFiDS_SurfData>& thePrev,
+   const double aF = aFp.FirstParameter(), aL = aFp.LastParameter();
+   const int    aNb = 100;
+   double       aW1 = aL, aD1 = aSide2(aL);
+-  for (int k = aNb - 1; k >= aNb / 2; --k)
++  for (int k = aNb - 1; k >= aNb / 5; --k)
+   {
+     const double aW0 = aF + (aL - aF) * k / aNb;
+     const double aD0 = aSide2(aW0);
+@@ -4437,60 +4438,134 @@ void ChFi3d_Builder::PerformSetOfKGen(occ::handle<ChFiDS_Stripe>& Stripe, const
+       Bdeb = ChFi3d_mkbound(sprev, pdebs1, pdebs2, tolapp3d, 2.e-4);
+       Bfin = ChFi3d_mkbound(snext, pfins1, pfins2, tolapp3d, 2.e-4);
+ 
+-      GeomFill_ConstrainedFilling fil(11, 20);
+-      if (pointuon1)
+-      {
+-        fil.Init(Bon2, Bfin, Bdeb, !isCorner1);
+-      }
+-      else if (pointuon2)
+-      {
+-        fil.Init(Bon1, Bfin, Bdeb, !isCorner2);
+-      }
+-      else
+-      {
+-        // The compatibility conditions at the corners are checked (and the
+-        // tangency fields corrected) for a trace rebuilt smoothly: the
+-        // tangency to the faces is kept within 0.1 degree instead of 2.
+-        fil.Init(Bon1, Bfin, Bon2, Bdeb, !(isSmooth1 || isSmooth2 || isCorner1 || isCorner2));
+-      }
+-
+       ChFi3d_ReparamPcurv(0., 1., PC1);
+       ChFi3d_ReparamPcurv(0., 1., PC2);
+-      occ::handle<Geom_Surface> newsurf = fil.Surface();
+-      if (pointuon1)
+-      {
+-        newsurf->VReverse(); // we return to direction 1 from  2;
+-        done = CompleteData(cursd,
+-                            newsurf,
+-                            S1,
+-                            PC1,
+-                            S2,
+-                            PC2,
+-                            F2.Orientation(),
+-                            false,
+-                            false,
+-                            false,
+-                            false,
+-                            false);
+-        cursd->ChangeIndexOfS1(0);
++      // A constant radius ball which stays still is a sphere.
++      const occ::handle<ChFiDS_FilSpine> aFilSpine = occ::down_cast<ChFiDS_FilSpine>(Spine);
++      bool                               isSphere  = false;
++      if (myIsBall && pointuon1 != pointuon2 && !aFilSpine.IsNull() && aFilSpine->IsConstant())
++      {
++        const int                               anApexSide = pointuon1 ? 1 : 2;
++        const ChFiDS_FaceInterference&          aPrevFi    = prevsd->Interference(anApexSide);
++        const occ::handle<BRepAdaptor_Surface>& aSApex     = pointuon1 ? S1 : S2;
++        const occ::handle<BRepAdaptor_Surface>& aSTrace    = pointuon1 ? S2 : S1;
++        const occ::handle<Geom2d_Curve>&        aPCTrace   = pointuon1 ? PC2 : PC1;
++        if (!aPrevFi.PCurveOnFace().IsNull())
++        {
++          const gp_Pnt2d anApexUV = aPrevFi.PCurveOnFace()->Value(aPrevFi.LastParameter());
++          gp_Pnt         anApex;
++          gp_Vec         aDu, aDv;
++          aSApex->D1(anApexUV.X(), anApexUV.Y(), anApex, aDu, aDv);
++          isSphere = ChFi3d_SphereData(DStr,
++                                       cursd,
++                                       anApex,
++                                       aDu.Crossed(aDv),
++                                       aFilSpine->Radius(),
++                                       anApexSide,
++                                       aSTrace,
++                                       aPCTrace,
++                                       0.,
++                                       1.,
++                                       tolapp3d);
++        }
++        if (isSphere)
++        {
++          // The transition on the trace and the orientation as by CompleteData.
++          gp_Pnt         aP;
++          gp_Vec         aDu, aDv;
++          const gp_Pnt2d aUVf = aPCTrace->Value(0.5);
++          aSTrace->D1(aUVf.X(), aUVf.Y(), aP, aDu, aDv);
++          const gp_Vec   aNf  = aDu.Crossed(aDv);
++          const gp_Pnt2d aUVs = cursd->Interference(3 - anApexSide).PCurveOnSurf()->Value(0.5);
++          DStr.Surface(cursd->Surf()).Surface()->D1(aUVs.X(), aUVs.Y(), aP, aDu, aDv);
++          const double       aDot = aNf.Dot(aDu.Crossed(aDv));
++          TopAbs_Orientation anOr = pointuon1 ? F2.Orientation() : F1.Orientation();
++          bool               isRev;
++          if (pointuon1)
++          {
++            isRev = aDot < 0.;
++            if (isRev)
++            {
++              anOr = TopAbs::Reverse(anOr);
++            }
++          }
++          else
++          {
++            isRev = aDot > 0.;
++            if (!isRev)
++            {
++              anOr = TopAbs::Reverse(anOr);
++            }
++          }
++          ChFiDS_FaceInterference& aFi = cursd->ChangeInterference(3 - anApexSide);
++          aFi.SetTransition(isRev ? TopAbs_REVERSED : TopAbs_FORWARD);
++          cursd->ChangeOrientation() = anOr;
++          done                       = true;
++          if (pointuon1)
++          {
++            cursd->ChangeIndexOfS1(0);
++          }
++          else
++          {
++            cursd->ChangeIndexOfS2(0);
++          }
++        }
+       }
+-      else
++      if (!isSphere)
+       {
+-        done = CompleteData(cursd,
+-                            newsurf,
+-                            S1,
+-                            PC1,
+-                            S2,
+-                            PC2,
+-                            F1.Orientation(),
+-                            true,
+-                            false,
+-                            false,
+-                            false,
+-                            false);
+-        if (pointuon2)
++        GeomFill_ConstrainedFilling fil(11, 20);
++        if (pointuon1)
++        {
++          fil.Init(Bon2, Bfin, Bdeb, !isCorner1);
++        }
++        else if (pointuon2)
+         {
+-          cursd->ChangeIndexOfS2(0);
++          fil.Init(Bon1, Bfin, Bdeb, !isCorner2);
++        }
++        else
++        {
++          // The compatibility conditions at the corners are checked (and the
++          // tangency fields corrected) for a trace rebuilt smoothly: the
++          // tangency to the faces is kept within 0.1 degree instead of 2.
++          fil.Init(Bon1, Bfin, Bon2, Bdeb, !(isSmooth1 || isSmooth2 || isCorner1 || isCorner2));
++        }
++
++        occ::handle<Geom_Surface> newsurf = fil.Surface();
++        if (pointuon1)
++        {
++          newsurf->VReverse(); // we return to direction 1 from  2;
++          done = CompleteData(cursd,
++                              newsurf,
++                              S1,
++                              PC1,
++                              S2,
++                              PC2,
++                              F2.Orientation(),
++                              false,
++                              false,
++                              false,
++                              false,
++                              false);
++          cursd->ChangeIndexOfS1(0);
++        }
++        else
++        {
++          done = CompleteData(cursd,
++                              newsurf,
++                              S1,
++                              PC1,
++                              S2,
++                              PC2,
++                              F1.Orientation(),
++                              true,
++                              false,
++                              false,
++                              false,
++                              false);
++          if (pointuon2)
++          {
++            cursd->ChangeIndexOfS2(0);
++          }
+         }
+       }
+       // The filling is oriented as the surfdata before it.
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx
+index b74d8968e..0f928049b 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx
+@@ -20,6 +20,8 @@
+ #include <BRepAdaptor_Surface.hxx>
+ #include <BRep_Tool.hxx>
+ #include <Geom2d_Curve.hxx>
++#include <Geom2d_BSplineCurve.hxx>
++#include <Geom2dAPI_Interpolate.hxx>
+ #include <BRepBlend_ConstRad.hxx>
+ #include <BRepBlend_ConstRadInv.hxx>
+ #include <BRepBlend_CurvPointRadInv.hxx>
+@@ -1600,6 +1602,187 @@ static bool TrimDegeneratedExtension(const occ::handle<BRepBlend_Line>& theLine,
+ 
+ //=================================================================================================
+ 
++static bool StillBallData(TopOpeBRepDS_DataStructure&             theDS,
++                          const occ::handle<ChFiDS_SurfData>&     theData,
++                          const occ::handle<BRepBlend_Line>&      theLin,
++                          const occ::handle<BRepAdaptor_Surface>& theS1,
++                          const occ::handle<BRepAdaptor_Surface>& theS2,
++                          const TopAbs_Orientation                theOr,
++                          const double                            theR,
++                          const bool                              theIsGiven,
++                          const double                            theTol3d)
++{
++  // The walking of a ball which stays still (nested into a fillet
++  // of the same radius: its contact on a face does not move) can
++  // not be approximated, the trace on that face is a point. The
++  // surfdata is a part of the sphere of the ball, twisted on that
++  // side to be bounded by its neighbors (see PerformSetOfKGen).
++  const int aNb = theLin->NbPoints();
++  if (aNb < 4 || theIsGiven || theS1.IsNull() || theS2.IsNull())
++  {
++    return false;
++  }
++  int anApexSide = 0;
++  for (int aSide = 1; aSide <= 2 && anApexSide == 0; ++aSide)
++  {
++    const gp_Pnt& aP0   = aSide == 1 ? theLin->Point(1).PointOnS1() : theLin->Point(1).PointOnS2();
++    double        aDist = 0.;
++    for (int k = 2; k <= aNb; ++k)
++    {
++      aDist = std::max(
++        aDist,
++        aP0.Distance(aSide == 1 ? theLin->Point(k).PointOnS1() : theLin->Point(k).PointOnS2()));
++    }
++    if (aDist < theTol3d)
++    {
++      anApexSide = aSide;
++    }
++  }
++  if (anApexSide == 0)
++  {
++    return false;
++  }
++  const occ::handle<BRepAdaptor_Surface>& aSApex  = anApexSide == 1 ? theS1 : theS2;
++  const occ::handle<BRepAdaptor_Surface>& aSTrace = anApexSide == 1 ? theS2 : theS1;
++  double                                  aU, aV;
++  if (anApexSide == 1)
++  {
++    theLin->Point(1).ParametersOnS1(aU, aV);
++  }
++  else
++  {
++    theLin->Point(1).ParametersOnS2(aU, aV);
++  }
++  gp_Pnt anApex;
++  gp_Vec aDu, aDv;
++  aSApex->D1(aU, aV, anApex, aDu, aDv);
++  const gp_Vec anApexNormal = aDu.Crossed(aDv);
++
++  // The trace on the other face, through points of the walking.
++  const int                      aNbSample = std::min(aNb, 60);
++  NCollection_Sequence<gp_Pnt2d> aUVSeq;
++  NCollection_Sequence<double>   aWSeq;
++  for (int j = 0; j < aNbSample; ++j)
++  {
++    const int          k  = 1 + (int)std::lround(double(aNb - 1) * j / (aNbSample - 1));
++    const Blend_Point& aP = theLin->Point(k);
++    if (!aWSeq.IsEmpty() && aP.Parameter() <= aWSeq.Last() + Precision::PConfusion())
++    {
++      continue;
++    }
++    if (anApexSide == 1)
++    {
++      aP.ParametersOnS2(aU, aV);
++    }
++    else
++    {
++      aP.ParametersOnS1(aU, aV);
++    }
++    aUVSeq.Append(gp_Pnt2d(aU, aV));
++    aWSeq.Append(aP.Parameter());
++  }
++  if (aWSeq.Length() < 4)
++  {
++    return false;
++  }
++  occ::handle<NCollection_HArray1<gp_Pnt2d>> aUVs =
++    new NCollection_HArray1<gp_Pnt2d>(1, aWSeq.Length());
++  occ::handle<NCollection_HArray1<double>> aWs = new NCollection_HArray1<double>(1, aWSeq.Length());
++  for (int j = 1; j <= aWSeq.Length(); ++j)
++  {
++    aUVs->SetValue(j, aUVSeq(j));
++    aWs->SetValue(j, aWSeq(j));
++  }
++  Geom2dAPI_Interpolate anInt(aUVs, aWs, false, Precision::PConfusion());
++  anInt.Perform();
++  if (!anInt.IsDone())
++  {
++    return false;
++  }
++  const occ::handle<Geom2d_Curve> aPC(anInt.Curve());
++  const double                    aW1 = aWSeq.First(), aW2 = aWSeq.Last();
++  if (!ChFi3d_SphereData(theDS,
++                         theData,
++                         anApex,
++                         anApexNormal,
++                         theR,
++                         anApexSide,
++                         aSTrace,
++                         aPC,
++                         aW1,
++                         aW2,
++                         theTol3d))
++  {
++    return false;
++  }
++
++  // The transitions are the ones of the walking, the orientation is the one
++  // of the face S1 to the fillet, as by StoreData.
++  theData->ChangeInterferenceOnS1().SetTransition(ChFi3d_TrsfTrans(theLin->TransitionOnS1()));
++  theData->ChangeInterferenceOnS2().SetTransition(ChFi3d_TrsfTrans(theLin->TransitionOnS2()));
++  const occ::handle<Geom_Surface>& aSurf = theDS.Surface(theData->Surf()).Surface();
++  const double                     aWm   = 0.5 * (aW1 + aW2);
++  gp_Pnt2d                         aUVS1;
++  gp_Pnt2d                         aUVFil = theData->InterferenceOnS1().PCurveOnSurf()->Value(aWm);
++  if (anApexSide == 1)
++  {
++    // Next to the pole.
++    double aU1, aV1;
++    theLin->Point(1).ParametersOnS1(aU1, aV1);
++    aUVS1 = gp_Pnt2d(aU1, aV1);
++    aUVFil.SetY(aUVFil.Y() + 1.e-3);
++  }
++  else
++  {
++    aUVS1 = aPC->Value(aWm);
++  }
++  gp_Pnt aP;
++  theS1->D1(aUVS1.X(), aUVS1.Y(), aP, aDu, aDv);
++  gp_Vec aN1 = aDu.Crossed(aDv);
++  if (theOr == TopAbs_REVERSED)
++  {
++    aN1.Reverse();
++  }
++  aSurf->D1(aUVFil.X(), aUVFil.Y(), aP, aDu, aDv);
++  theData->ChangeOrientation() = aN1.Dot(aDu.Crossed(aDv)) > 0. ? TopAbs_FORWARD : TopAbs_REVERSED;
++
++  const double aTol1 = theDS.Curve(theData->InterferenceOnS1().LineIndex()).Tolerance();
++  const double aTol2 = theDS.Curve(theData->InterferenceOnS2().LineIndex()).Tolerance();
++  ChFi3d_FilCommonPoint(theLin->StartPointOnFirst(),
++                        theLin->TransitionOnS1(),
++                        true,
++                        theData->ChangeVertex(true, 1),
++                        aTol1);
++  ChFi3d_FilCommonPoint(theLin->EndPointOnFirst(),
++                        theLin->TransitionOnS1(),
++                        false,
++                        theData->ChangeVertex(false, 1),
++                        aTol1);
++  ChFi3d_FilCommonPoint(theLin->StartPointOnSecond(),
++                        theLin->TransitionOnS2(),
++                        true,
++                        theData->ChangeVertex(true, 2),
++                        aTol2);
++  ChFi3d_FilCommonPoint(theLin->EndPointOnSecond(),
++                        theLin->TransitionOnS2(),
++                        false,
++                        theData->ChangeVertex(false, 2),
++                        aTol2);
++  theData->FirstSpineParam(aW1);
++  theData->LastSpineParam(aW2);
++  if (anApexSide == 1)
++  {
++    theData->TwistOnS1(true);
++  }
++  else
++  {
++    theData->TwistOnS2(true);
++  }
++  return true;
++}
++
++//=================================================================================================
++
+ bool ChFi3d_FilBuilder::PerformSurf(NCollection_Sequence<occ::handle<ChFiDS_SurfData>>& SeqData,
+                                     const occ::handle<ChFiDS_ElSpine>&                  HGuide,
+                                     const occ::handle<ChFiDS_Spine>&                    Spine,
+@@ -1743,6 +1926,18 @@ bool ChFi3d_FilBuilder::PerformSurf(NCollection_Sequence<occ::handle<ChFiDS_Surf
+ 
+     done = aCompleteData(Func);
+ 
++    if (!done && myIsBall)
++    {
++      done = StillBallData(myDS->ChangeDS(),
++                           Data,
++                           lin,
++                           S1,
++                           S2,
++                           Or,
++                           fsp->Radius(),
++                           gd1 || gd2 || gf1 || gf2,
++                           tolapp3d);
++    }
+     if (!done)
+     {
+       throw Standard_Failure("PerformSurf : Failed approximation!");
+diff --git a/tests/bugs/modalg_8/fillet_wall_profile_ball_does_not_pass_root b/tests/bugs/modalg_8/fillet_wall_profile_ball_does_not_pass_root
+new file mode 100644
+index 000000000..83cd7439d
+--- /dev/null
++++ b/tests/bugs/modalg_8/fillet_wall_profile_ball_does_not_pass_root
+@@ -0,0 +1,19 @@
++puts "============"
++puts "Modeling Algorithms - Fillet of the start wall of a thread too large for the fillet of its root"
++puts "(FreeCAD screw: fillets of the crests of radius 2, fillet of the wall of radius 2)"
++puts "============"
++puts ""
++
++# A ball of radius 2 does not pass the fillet of the root (radius 1): the
++# trace on the wall of the surfdatas after the swallowtail crosses the trace
++# of the surfdata before it, far back on it (as SolidWorks leaves a small
++# triangle of the wall there). The traces are cut at the crossing and the
++# surfdatas between are rebuilt by a filling which ends at that point.
++restore [locate_data_file freecad_screw_wall_profile_crest2.brep] b
++explode b E
++
++blend result b 2 b_95
++
++checkshape result
++checkmaxtol result -ref 2.76e-4
++checkprops result -v 8688.22 -s 2995.41
+diff --git a/tests/bugs/modalg_8/fillet_wall_profile_over_root b/tests/bugs/modalg_8/fillet_wall_profile_over_root
+index a330c0e10..300afdb8a 100644
+--- a/tests/bugs/modalg_8/fillet_wall_profile_over_root
++++ b/tests/bugs/modalg_8/fillet_wall_profile_over_root
+@@ -7,9 +7,11 @@ puts ""
+ # The fillet runs along the whole profile of the groove on its start wall.
+ # A ball of the radius of the fillet of the root just fits into it: it stays
+ # there touching the wall at one point, where the traces on the wall of the
+-# fillets of the two flanks meet at a corner (as SolidWorks makes it, with a
+-# sphere). The surfdata of the ball in the fillet of the root is twisted and
+-# rebuilt by a filling which ends at that point. Both ends are closed as in
++# fillets of the two flanks meet at a corner. The fillet of the root is not
++# exactly the envelope of the ball (the walked trace on it is 0.0024 off the
++# sphere of the ball), so the surfdata of the ball in the fillet of the root
++# is rebuilt by a filling which ends at that point, not by the sphere of
++# fillet_wall_profile_sphere_at_root. Both ends are closed as in
+ # fillet_wall_profile_cusp_ends.
+ restore [locate_data_file freecad_screw_wall_profile.brep] b
+ explode b E
+diff --git a/tests/bugs/modalg_8/fillet_wall_profile_sphere_at_root b/tests/bugs/modalg_8/fillet_wall_profile_sphere_at_root
+new file mode 100644
+index 000000000..72ee9fec2
+--- /dev/null
++++ b/tests/bugs/modalg_8/fillet_wall_profile_sphere_at_root
+@@ -0,0 +1,36 @@
++puts "============"
++puts "Modeling Algorithms - Fillet of the start wall of a thread over the fillet of its root"
++puts "(FreeCAD screw: fillets of the crests of radius 2, fillet of the wall of radius 1)"
++puts "============"
++puts ""
++
++# A ball of the radius of the fillet of the root (1) stays still in it,
++# touching the wall at one point: the walking can not be approximated there.
++# That part of the fillet is the sphere of the ball, as SolidWorks makes it
++# (center (-6.3705, 1, 41.7026)), with its pole at the point on the wall,
++# between the fillets of the two flanks.
++restore [locate_data_file freecad_screw_wall_profile_crest2.brep] b
++explode b E
++
++blend result b 1 b_95
++
++checkshape result
++checkmaxtol result -ref 1.83e-4
++checkprops result -v 8684.69 -s 2997.19
++
++set nbsph 0
++foreach f [explode result F] {
++  mksurface s $f
++  set d [dump s]
++  if {[regexp {SphericalSurface} $d]} {
++    incr nbsph
++    regexp {Center :([-0-9.e]+), ([-0-9.e]+), ([-0-9.e]+)} $d full x y z
++    regexp {Radius :([-0-9.e]+)} $d full r
++    if {abs($x + 6.3705) > 1.e-3 || abs($y - 1.) > 1.e-3 || abs($z - 41.7026) > 1.e-3 || abs($r - 1.) > 1.e-7} {
++      puts "Error: the sphere is ($x $y $z) R=$r instead of (-6.3705 1 41.7026) R=1"
++    }
++  }
++}
++if {$nbsph != 1} {
++  puts "Error: $nbsph spherical faces instead of 1"
++}
+-- 
+2.43.0
+

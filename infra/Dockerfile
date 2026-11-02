@@ -37,7 +37,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 RUN set -e; V=$(grep -v '^#' /freecad.version | grep -v '^ *$' | tail -1); \
     mkdir -p /src /i18n; \
-    curl -fsSL "https://github.com/FreeCAD/FreeCAD/archive/refs/tags/$V.tar.gz" \
+    curl -fsSL "https://github.com/FreeCAD/FreeCAD/archive/$V.tar.gz" \
       | tar xz -C /src --strip-components=1 --wildcards '*.ts'; \
     find /src/src -name '*_*.ts' | while read -r ts; do \
       /usr/lib/qt6/bin/lrelease -silent "$ts" -qm "/i18n/$(basename "${ts%.ts}").qm"; \

@@ -1,0 +1,157 @@
+From c4d4353ee5d3fa8e6269338be1fe808bf8508a73 Mon Sep 17 00:00:00 2001
+From: Kuzma30 <kuzemkoa@gmail.com>
+Date: Mon, 26 Oct 2026 10:09:17 +0200
+Subject: [PATCH 06/24] Modeling Algorithms - Reject a fillet end intersection
+ that does not join the section
+
+PerformIntersectionAtEnd intersects the end of the fillet with the faces
+around the corner. When the fillet runs past a support face that shrinks
+to nothing (a quarter turn of a square on a box, FreeCAD issue 27807), the
+next face only touches the fillet. The curve found then has zero length and
+does not join the ends of the section; the gap was hidden by a tolerance of
+tens of millimeters and the shape was reported valid.
+
+If the ends of the curve are farther than 10% of the section chord from the
+ends of the section, treat the intersection as failed and build the corner
+with PerformMoreThreeCorner, as when the intersection is not found.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
+---
+ .../TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx     | 15 ++-
+ .../GTests/BRepFilletAPI_MakeFillet_Test.cxx  | 96 +++++++++++++++++++
+ 2 files changed, 109 insertions(+), 2 deletions(-)
+
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
+index 6e724a562..2afbc1ab5 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
+@@ -3178,8 +3178,19 @@ void ChFi3d_Builder::PerformIntersectionAtEnd(const int Index)
+     Ps->D0(p2, p2d2);
+     HGs->D0(p2d1.X(), p2d1.Y(), P5);
+     HGs->D0(p2d2.X(), p2d2.Y(), P6);
+-    to1 = std::max(P1.Distance(P5) + P3.Distance(P7), tolreached);
+-    to2 = std::max(P2.Distance(P6) + P4.Distance(P8), tolreached);
++    const double aDev1 = P1.Distance(P5) + P3.Distance(P7);
++    const double aDev2 = P2.Distance(P6) + P4.Distance(P8);
++    to1                = std::max(aDev1, tolreached);
++    to2                = std::max(aDev2, tolreached);
++    // The face may only touch the fillet, e.g. when the fillet runs past the end
++    // of a support face that shrinks to nothing. The curve found then does not
++    // join the ends of the section, and the tolerance would hide the gap. Treat
++    // it as a failed intersection.
++    if (std::max(aDev1, aDev2) > 0.1 * P1.Distance(P2))
++    {
++      PerformMoreThreeCorner(Index, 1);
++      return;
++    }
+ 
+     //////////////////////////////////////////////////////////////////////
+     // storage in the DS of the intersection curve
+diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+index 0a48404ea..ebf0ae62d 100644
+--- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
++++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+@@ -972,3 +972,99 @@ TEST(BRepFilletAPI_MakeFilletTest, GrooveEndingOnCylinderSeam_SucceedsWithoutCra
+   aFillet.Add(0.5, aRim);
+   EXPECT_NO_THROW(aFillet.Build());
+ }
++
++//=================================================================================================
++// Fillet whose support face shrinks to nothing at its end (FreeCAD issue 27807)
++
++namespace
++{
++
++// A box with a quarter turn of a 25 x 50 square on top of it. The flat ends
++// of the revolved part are quarter discs whose height falls to zero at y = 50,
++// so a fillet of radius 15 along their bottom edges runs past them there.
++TopoDS_Shape MakeQuarterRevolveOnBox()
++{
++  const TopoDS_Shape aBox =
++    BRepPrimAPI_MakeBox(gp_Pnt(-50.0, -50.0, 0.0), 100.0, 100.0, 100.0).Shape();
++  BRepBuilderAPI_MakePolygon aProfile(gp_Pnt(0.0, 0.0, 100.0),
++                                      gp_Pnt(25.0, 0.0, 100.0),
++                                      gp_Pnt(25.0, 0.0, 150.0),
++                                      gp_Pnt(0.0, 0.0, 150.0),
++                                      true);
++  const TopoDS_Face          aFace = BRepBuilderAPI_MakeFace(aProfile.Wire(), true).Face();
++  const TopoDS_Shape         aRevol =
++    BRepPrimAPI_MakeRevol(aFace, gp_Ax1(gp_Pnt(0.0, 0.0, 100.0), gp::DX()), -M_PI / 2.0).Shape();
++  ShapeUpgrade_UnifySameDomain aUnify(BRepAlgoAPI_Fuse(aBox, aRevol).Shape());
++  aUnify.Build();
++  return aUnify.Shape();
++}
++
++// Returns the edges on the top of the box along the ends of the revolved part,
++// at x = 0 and x = 25 (theWithEnd adds the edge at y = 0 between them).
++NCollection_List<TopoDS_Edge> RevolveFootEdges(const TopoDS_Shape& theShape, const bool theWithEnd)
++{
++  NCollection_List<TopoDS_Edge>                                 anEdges;
++  NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> aMap;
++  TopExp::MapShapes(theShape, TopAbs_EDGE, aMap);
++  for (int i = 1; i <= aMap.Extent(); ++i)
++  {
++    const TopoDS_Edge& anEdge = TopoDS::Edge(aMap(i));
++    GProp_GProps       aProps;
++    BRepGProp::LinearProperties(anEdge, aProps);
++    const gp_Pnt aMid = aProps.CentreOfMass();
++    if (std::abs(aMid.Z() - 100.0) > 1.e-6)
++    {
++      continue;
++    }
++    const bool isSide = (std::abs(aMid.X()) < 1.e-6 || std::abs(aMid.X() - 25.0) < 1.e-6)
++                        && std::abs(aMid.Y() - 25.0) < 1.e-6;
++    const bool isEnd = std::abs(aMid.X() - 12.5) < 1.e-6 && std::abs(aMid.Y()) < 1.e-6;
++    if (isSide || (theWithEnd && isEnd))
++    {
++      anEdges.Append(anEdge);
++    }
++  }
++  return anEdges;
++}
++
++double MaxVertexTolerance(const TopoDS_Shape& theShape)
++{
++  double aMax = 0.0;
++  for (TopExp_Explorer anExp(theShape, TopAbs_VERTEX); anExp.More(); anExp.Next())
++  {
++    aMax = std::max(aMax, BRep_Tool::Tolerance(TopoDS::Vertex(anExp.Current())));
++  }
++  return aMax;
++}
++
++} // namespace
++
++// Near y = 50 the fillet is higher than the quarter disc it rests on. The end
++// of the fillet was intersected with the revolved cylinder, which only touches
++// it; the degenerated curve was kept with a tolerance of tens of millimeters,
++// and the added volume was ten times too large.
++TEST(BRepFilletAPI_MakeFilletTest, PastShrinkingSupportFace_KeepsAddedVolume)
++{
++  const TopoDS_Shape                  aShape  = MakeQuarterRevolveOnBox();
++  const NCollection_List<TopoDS_Edge> anEdges = RevolveFootEdges(aShape, false);
++  ASSERT_EQ(anEdges.Extent(), 2);
++
++  GProp_GProps aBaseProps;
++  BRepGProp::VolumeProperties(aShape, aBaseProps);
++  for (const TopoDS_Edge& anEdge : anEdges)
++  {
++    BRepFilletAPI_MakeFillet aFillet(aShape);
++    aFillet.Add(15.0, anEdge);
++    aFillet.Build();
++    ASSERT_TRUE(aFillet.IsDone());
++    EXPECT_TRUE(BRepCheck_Analyzer(aFillet.Shape()).IsValid());
++    EXPECT_LT(MaxVertexTolerance(aFillet.Shape()), 5.0);
++
++    // About (1 - pi/4) * 15^2 * 50 = 2414 mm3 is added along the edge.
++    GProp_GProps aProps;
++    BRepGProp::VolumeProperties(aFillet.Shape(), aProps);
++    const double anAdded = aProps.Mass() - aBaseProps.Mass();
++    EXPECT_GT(anAdded, 1500.0);
++    EXPECT_LT(anAdded, 2700.0);
++  }
++}
+-- 
+2.43.0
+

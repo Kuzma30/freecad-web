@@ -1,0 +1,120 @@
+From 1e66103b648d9efeb7239816e279038fec369910 Mon Sep 17 00:00:00 2001
+From: Kuzma30 <kuzemkoa@gmail.com>
+Date: Mon, 26 Oct 2026 10:09:17 +0200
+Subject: [PATCH 02/24] Modeling Algorithms - Pick the used pcurve of one-sided
+ seam edges in fillets
+
+A Boolean cut made exactly along the periodic seam of a surface leaves
+edges that keep both pcurves of the seam (BRep_Tool::IsClosed is true), but
+bound the resulting face on one side only and appear in it once. The
+fillet start solution took the pcurve of the FORWARD edge, which can lie on
+the other side of the period, outside the face domain. The walking then
+never found a start point (ChFiDS_StartsolFailure).
+
+getCurveOnSurface() in ChFi3d_Builder_2 now returns the pcurve of the
+occurrence of such an edge in the face. Real seams, used twice in the face,
+are handled as before.
+
+This fixes the fillet of a torus cut along its seams (FreeCAD issue 5799),
+and the same failure on cones and tori cut through their seam planes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
+---
+ .../TKFillet/ChFi3d/ChFi3d_Builder_2.cxx      | 24 +++++++++++
+ .../GTests/BRepFilletAPI_MakeFillet_Test.cxx  | 40 +++++++++++++++++++
+ 2 files changed, 64 insertions(+)
+
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
+index 4d553d4bc..251be1579 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
+@@ -86,6 +86,30 @@ static inline occ::handle<Geom2d_Curve> getCurveOnSurface(const TopoDS_Edge& the
+ 
+   double aFirstParam = 0.;
+   double aLastParam  = 0.;
++  if (!BRep_Tool::IsClosed(theEdge, theFace))
++  {
++    return BRep_Tool::CurveOnSurface(theEdge, theFace, aFirstParam, aLastParam);
++  }
++
++  // The edge has two pcurves on this surface. On a real seam the face uses the
++  // edge twice and the caller's orientation selects the side. An edge lying on
++  // the periodic seam of the surface, but bounding the face on one side only
++  // (for example after a Boolean cut exactly along the seam), is used once:
++  // take the pcurve of that occurrence, the other one is outside the face.
++  TopoDS_Edge aUsedEdge;
++  int         aNbUses = 0;
++  for (TopExp_Explorer anExp(theFace, TopAbs_EDGE); anExp.More(); anExp.Next())
++  {
++    if (anExp.Current().IsSame(theEdge))
++    {
++      aUsedEdge = TopoDS::Edge(anExp.Current());
++      ++aNbUses;
++    }
++  }
++  if (aNbUses == 1)
++  {
++    return BRep_Tool::CurveOnSurface(aUsedEdge, theFace, aFirstParam, aLastParam);
++  }
+   return BRep_Tool::CurveOnSurface(theEdge, theFace, aFirstParam, aLastParam);
+ }
+ 
+diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+index aed8e00bd..b62bc5f12 100644
+--- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
++++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+@@ -30,6 +30,7 @@
+ #include <BRepPrimAPI_MakePrism.hxx>
+ #include <BRepPrimAPI_MakeRevol.hxx>
+ #include <BRepPrimAPI_MakeSphere.hxx>
++#include <BRepPrimAPI_MakeTorus.hxx>
+ #include <BRep_Tool.hxx>
+ #include <NCollection_IndexedDataMap.hxx>
+ #include <NCollection_IndexedMap.hxx>
+@@ -812,3 +813,42 @@ TEST(BRepFilletAPI_MakeFilletTest, SquareHoleAcrossRoundedEdges_SucceedsWithoutC
+     EXPECT_TRUE(BRepCheck_Analyzer(aFillet.Shape()).IsValid());
+   }
+ }
++
++// A torus cut exactly along the seams of its surface (FreeCAD issue 5799).
++// The cut leaves edges that carry both pcurves of the seam but bound the face
++// on one side only. The fillet used the pcurve on the wrong side of the
++// period and failed to find a start solution.
++TEST(BRepFilletAPI_MakeFilletTest, CutTorusAlongSeams_ProducesValidShape)
++{
++  const double       aR = 72.0;
++  const gp_Ax2       anAxes(gp::Origin(), gp::DX());
++  const TopoDS_Shape aTorus = BRepPrimAPI_MakeTorus(anAxes, aR - 4.0, 4.0).Shape();
++  const TopoDS_Shape aBox =
++    BRepPrimAPI_MakeBox(gp_Pnt(-2.0 * aR, -2.0 * aR, -2.0 * aR), 4.0 * aR, 2.0 * aR, 4.0 * aR)
++      .Shape();
++  const TopoDS_Shape aCyl = BRepPrimAPI_MakeCylinder(anAxes, aR + 2.0, 9.0).Shape();
++  BRepAlgoAPI_Cut    aCut1(aTorus, aBox);
++  ASSERT_TRUE(aCut1.IsDone());
++  BRepAlgoAPI_Cut aCut2(aCut1.Shape(), aCyl);
++  ASSERT_TRUE(aCut2.IsDone());
++  const TopoDS_Shape& aShape = aCut2.Shape();
++
++  NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> anEdges;
++  TopExp::MapShapes(aShape, TopAbs_EDGE, anEdges);
++  ASSERT_EQ(anEdges.Extent(), 6);
++
++  BRepFilletAPI_MakeFillet aFillet(aShape);
++  for (int i = 1; i <= anEdges.Extent(); ++i)
++  {
++    aFillet.Add(0.2, TopoDS::Edge(anEdges(i)));
++  }
++  aFillet.Build();
++  ASSERT_TRUE(aFillet.IsDone());
++  EXPECT_TRUE(BRepCheck_Analyzer(aFillet.Shape()).IsValid());
++
++  GProp_GProps aBefore, anAfter;
++  BRepGProp::VolumeProperties(aShape, aBefore);
++  BRepGProp::VolumeProperties(aFillet.Shape(), anAfter);
++  // same as for a cut shifted off the seam by 0.001 (4.308 removed)
++  EXPECT_NEAR(aBefore.Mass() - anAfter.Mass(), 4.32, 0.05);
++}
+-- 
+2.43.0
+

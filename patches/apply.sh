@@ -151,9 +151,25 @@ check_freecad_version() {
   [ -d "$tree" ] || return 0
   want="$(grep -v '^#' "$PATCHES/freecad.version" | tr -d '[:space:]')"
   [ -n "$want" ] || return 0
+  # A commit of FreeCAD main: the fetch records which one it extracted, because a source
+  # tarball of a commit carries no other trace of it.
+  if printf '%s' "$want" | grep -qE '^[0-9a-f]{40}$'; then
+    got="$(tr -d '[:space:]' < "$tree/.fcweb-freecad-commit" 2>/dev/null || true)"
+    if [ "$got" != "$want" ]; then
+      echo "  !! freecad: tree is commit '${got:-unknown}', but freecad.patch is rebased onto $want."
+      echo "     Fetch https://github.com/FreeCAD/FreeCAD/archive/$want.tar.gz and write the"
+      echo "     commit to $tree/.fcweb-freecad-commit, or rebase the patch."
+      return 1
+    fi
+    echo "  .. freecad: tree is commit $got, matching freecad.version"
+    return 0
+  fi
   cmake="$tree/CMakeLists.txt"
   [ -f "$cmake" ] || { echo "  !! freecad: no CMakeLists.txt in $tree"; return 1; }
   got="$(grep -oE '^set[(]PACKAGE_VERSION_(MAJOR|MINOR|PATCH) "[0-9]+"' "$cmake" | grep -oE '[0-9]+' | paste -sd. -)"
+  if [ -z "$got" ] && [ -f "$tree/version.json" ]; then
+    got="$(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); print("%s.%s.%s" % (v["version_major"], v["version_minor"], v["version_patch"]))' "$tree/version.json")"
+  fi
   if [ "$got" != "$want" ]; then
     echo "  !! freecad: tree is $got, but freecad.patch is rebased onto $want."
     echo "     Check out FreeCAD $want, or rebase the patch (tools/freecad-upgrade-scope.sh)."
@@ -170,6 +186,10 @@ apply_one freecad       freecad.patch
 apply_one pyside-setup  pyside-setup.patch \
   'sources/pyside6/cmake/Macros/PySideModules.cmake::--clang-option=--target=wasm64-unknown-emscripten'
 apply_one occt          occt.patch
+# The OCCT fillet series (FreeCAD forum, "Improving fillets in OCCT"; the 24 commits are in
+# occt-fillets/ for review), as one cumulative diff on top of occt.patch so that re-running
+# stays idempotent. Rebased onto the OCCT commit in patches/occt.version.
+apply_one occt          occt-fillets.patch
 apply_one cpython       cpython-ctypes-wasm.patch
 # Independent hunks on the same file (the switch, not the EM_JS); either order applies.
 apply_one cpython       cpython-trampoline-wasm64.patch

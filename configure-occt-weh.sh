@@ -1,7 +1,9 @@
 #!/bin/bash
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # Copyright (c) Virtastic
-# Phase 1: OCCT 7.8.1 static cross-compile for wasm64-emscripten.
+# Phase 1: OCCT static cross-compile for wasm64-emscripten. The tree is OCCT master at the
+# commit in patches/occt.version (8.1.0.dev) with patches/occt.patch and the fillet series
+# (patches/occt-fillets.patch) applied by patches/apply.sh.
 # Mirrors the CS-Web emcmake+Ninja pattern. Headless geometry kernel only.
 set -e
 cd "$(dirname "$0")"
@@ -23,6 +25,9 @@ FT_LIBDIR="$CACHE/sysroot/lib/wasm64-emscripten"
 # link scripts in this repo. Cross-compiled it lands as .js+.wasm rather than a native binary,
 # so OCCT's install rule looks for build-occt/lin32/clang/bin/ExpToCasExe.wasm, does not find
 # it, and aborts the entire install AFTER all 5480 objects have compiled. CI run 32064568984.
+[ -f deps/src/rapidjson/include/rapidjson/rapidjson.h ] || {
+  echo "ERROR: RapidJSON headers missing under deps/src/rapidjson (see build-deps.yml)" >&2; exit 1; }
+
 emcmake cmake -S deps/src/occt -B build-occt -G Ninja \
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
   -D3RDPARTY_FREETYPE_INCLUDE_DIR_ft2build="$FT_INC" \
@@ -41,7 +46,10 @@ emcmake cmake -S deps/src/occt -B build-occt -G Ninja \
   -DUSE_FREETYPE=ON \
   -DUSE_TK=OFF -DUSE_TCL=OFF \
   -DUSE_FREEIMAGE=OFF -DUSE_TBB=OFF -DUSE_VTK=OFF \
-  -DUSE_RAPIDJSON=OFF -DUSE_DRACO=OFF -DUSE_FFMPEG=OFF -DUSE_OPENVR=OFF \
+  `# RapidJSON (header-only) is ON: since OCCT 8 TKDEGLTF is built only with it, and FreeCAD` \
+  `# links TKDEGLTF (glTF import/export).` \
+  -DUSE_RAPIDJSON=ON -D3RDPARTY_RAPIDJSON_INCLUDE_DIR="$ROOT/deps/src/rapidjson/include" \
+  -DUSE_DRACO=OFF -DUSE_FFMPEG=OFF -DUSE_OPENVR=OFF \
   -DUSE_OPENGL=OFF -DUSE_GLES2=ON \
   -DCMAKE_INSTALL_PREFIX="$DW" \
   -DINSTALL_DIR="$DW" \

@@ -1,0 +1,221 @@
+From 1c30d9455b1455ee6e5ec710570bff581cbc39aa Mon Sep 17 00:00:00 2001
+From: Kuzma30 <kuzemkoa@gmail.com>
+Date: Wed, 28 Oct 2026 15:28:31 +0200
+Subject: [PATCH 23/24] Modeling Algorithms - Count only the surfdatas of the
+ end edge at the end of a fillet
+
+FreeCAD issue 20085, a cube of 20 with fillets of radius 6 and a square
+hole of 8 x 8 whose walls go along the tangent lines of the fillets of
+the cube. A vertical (concave) edge of the hole and the two upper edges
+at it are filleted (Fillet001), then a lower edge next to that vertical
+edge (Fillet002). The spine of the second fillet goes on along the edge
+of the first one at the bottom of the hole and along the next lower edge:
+the fillet goes round the corner of the hole, crossing several faces
+there. The result had a volume of 4872 mm3 instead of 5150 and a
+tolerance of 9.5.
+
+ChFi3d_Builder::PerformIntersectionAtEnd compared the number of
+surfdatas of the stripe with the number of edges of its spine: when they
+differ, the last surfdata was taken for a short piece across smooth
+edges at the end, and the end was closed by PerformMoreThreeCorner when
+an edge next to the spine at the vertex was smooth (here the edge between
+the fillet of the cube and its sphere). The surfdatas are now counted on
+the edge of the spine at the vertex only: with one surfdata there, the
+end is computed as for a fillet of one edge (the end in the plane of the
+next wall of the hole).
+
+The second fillet is valid for r = 0.5 to 2 after the vertical edge alone
+(tolerance 1.4e-4 to 4.9e-4) or with the upper or the lower edges at it
+(the tolerance of the corner of the first fillets); each lower or upper
+edge next to the vertical one was tried.
+
+New DRAW test bugs/modalg_8/fillet_rounded_cube_square_hole_rim_after_corner
+and GTest
+BRepFilletAPI_MakeFilletTest.SquareHoleInRoundedCube_RimFilletGoesRoundFilletedCorner.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
+---
+ .../TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx     | 23 +++++-
+ .../GTests/BRepFilletAPI_MakeFillet_Test.cxx  | 79 +++++++++++++++++++
+ ..._rounded_cube_square_hole_rim_after_corner | 40 ++++++++++
+ 3 files changed, 139 insertions(+), 3 deletions(-)
+ create mode 100644 tests/bugs/modalg_8/fillet_rounded_cube_square_hole_rim_after_corner
+
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
+index d56dd783a..7ae693505 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
+@@ -5177,8 +5177,8 @@ void ChFi3d_Builder::PerformIntersectionAtEnd(const int Index)
+   TopoDS_Face   Fga, Fdr;
+   TopoDS_Vertex Vbid1;
+   int           nbsurf, nbedge;
+-  reg1    = false;
+-  reg2    = false;
++  reg1 = false;
++  reg2 = false;
+   // The surfdatas computed beyond the other end of the spine, with a side
+   // out of its face, are not counted.
+   nbsurf = 0;
+@@ -5205,7 +5205,24 @@ void ChFi3d_Builder::PerformIntersectionAtEnd(const int Index)
+     num1      = num - 1;
+     state     = spine->LastStatus();
+   }
+-  if (nbsurf != nbedge && nbsurf != 1)
++  // Only the surfdatas on the edge of the spine at the vertex matter: the
++  // fillet may cross several faces on other edges of its spine.
++  int aNbOnEnd = 0;
++  {
++    const int    anEnd   = isfirst ? 1 : nbedge;
++    const double aWFirst = spine->FirstParameter(anEnd), aWLast = spine->LastParameter(anEnd);
++    const double aTolW = Precision::PConfusion();
++    for (int i = 1; i <= SeqFil.Length(); ++i)
++    {
++      const occ::handle<ChFiDS_SurfData>& aSD = SeqFil(i);
++      if (aSD->IndexOfS1() > 0 && aSD->IndexOfS2() > 0 && aSD->LastSpineParam() > aWFirst + aTolW
++          && aSD->FirstSpineParam() < aWLast - aTolW)
++      {
++        ++aNbOnEnd;
++      }
++    }
++  }
++  if (nbsurf != nbedge && nbsurf != 1 && aNbOnEnd != 1)
+   {
+     ChFi3d_edge_common_faces(myEFMap(EdgeSpine), F1, F2);
+     if (F1.IsSame(facecouture))
+diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+index fbae6ec56..ef8d253b4 100644
+--- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
++++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+@@ -1812,3 +1812,82 @@ TEST(BRepFilletAPI_MakeFilletTest, SquareHoleInRoundedCube_ConvexAndConcaveFille
+     }
+   }
+ }
++
++// The same holed cube with a vertical (concave) edge of the hole filleted, then
++// a lower edge of the hole next to it in a second operation. The spine of the
++// second fillet goes on along the edge of the first one at the bottom of the
++// hole and along the next lower edge: the fillet goes round the corner of the
++// hole. Its ends, where it crosses several faces on the other edges of its
++// spine, were closed by plates with tolerance 9.5.
++TEST(BRepFilletAPI_MakeFilletTest, SquareHoleInRoundedCube_RimFilletGoesRoundFilletedCorner)
++{
++  const TopoDS_Shape aBox =
++    BRepPrimAPI_MakeBox(gp_Pnt(-10.0, -10.0, -10.0), 20.0, 20.0, 20.0).Shape();
++  BRepFilletAPI_MakeFillet aRound(aBox);
++  for (TopExp_Explorer anExp(aBox, TopAbs_EDGE); anExp.More(); anExp.Next())
++  {
++    aRound.Add(6.0, TopoDS::Edge(anExp.Current()));
++  }
++  aRound.Build();
++  ASSERT_TRUE(aRound.IsDone());
++
++  const TopoDS_Shape aTool = BRepPrimAPI_MakeBox(gp_Pnt(-4.0, -4.0, -11.0), 8.0, 8.0, 22.0).Shape();
++  BRepAlgoAPI_Cut    aCut(aRound.Shape(), aTool);
++  ASSERT_TRUE(aCut.IsDone());
++  const TopoDS_Shape& aHoled = aCut.Shape();
++
++  const double aRadii[2]   = {1.0, 2.0};
++  const double aRemoved[2] = {4.5713, 27.2583};
++  for (int r = 0; r < 2; ++r)
++  {
++    // the vertical edge at x = -4, y = -4
++    BRepFilletAPI_MakeFillet aFirst(aHoled);
++    for (TopExp_Explorer anExp(aHoled, TopAbs_EDGE); anExp.More(); anExp.Next())
++    {
++      GProp_GProps aProps;
++      BRepGProp::LinearProperties(anExp.Current(), aProps);
++      if (aProps.CentreOfMass().Distance(gp_Pnt(-4.0, -4.0, 0.0)) < 1.e-6)
++      {
++        aFirst.Add(aRadii[r], TopoDS::Edge(anExp.Current()));
++      }
++    }
++    ASSERT_EQ(aFirst.NbContours(), 1);
++    aFirst.Build();
++    ASSERT_TRUE(aFirst.IsDone());
++    const TopoDS_Shape& aShape1 = aFirst.Shape();
++
++    // the lower edge on the wall y = -4, shortened by the first fillet
++    BRepFilletAPI_MakeFillet aSecond(aShape1);
++    for (TopExp_Explorer anExp(aShape1, TopAbs_EDGE); anExp.More(); anExp.Next())
++    {
++      const TopoDS_Edge& anEdge = TopoDS::Edge(anExp.Current());
++      BRepAdaptor_Curve  aCurve(anEdge);
++      const gp_Pnt       aP1 = aCurve.Value(aCurve.FirstParameter());
++      const gp_Pnt       aP2 = aCurve.Value(aCurve.LastParameter());
++      if (std::abs(aP1.Y() + 4.0) < 1.e-4 && std::abs(aP2.Y() + 4.0) < 1.e-4
++          && std::abs(aP1.Z() + 10.0) < 1.e-4 && std::abs(aP2.Z() + 10.0) < 1.e-4
++          && aP1.Distance(aP2) > 4.0)
++      {
++        aSecond.Add(aRadii[r], anEdge);
++        break;
++      }
++    }
++    ASSERT_EQ(aSecond.NbContours(), 1);
++    aSecond.Build();
++    ASSERT_TRUE(aSecond.IsDone()) << "r = " << aRadii[r];
++    const TopoDS_Shape& aResult = aSecond.Shape();
++    EXPECT_TRUE(BRepCheck_Analyzer(aResult).IsValid()) << "r = " << aRadii[r];
++
++    double aMaxTol = 0.0;
++    for (TopExp_Explorer anExp(aResult, TopAbs_VERTEX); anExp.More(); anExp.Next())
++    {
++      aMaxTol = std::max(aMaxTol, BRep_Tool::Tolerance(TopoDS::Vertex(anExp.Current())));
++    }
++    EXPECT_LT(aMaxTol, 1.e-3) << "r = " << aRadii[r];
++
++    GProp_GProps aBefore, anAfter;
++    BRepGProp::VolumeProperties(aShape1, aBefore);
++    BRepGProp::VolumeProperties(aResult, anAfter);
++    EXPECT_NEAR(aBefore.Mass() - anAfter.Mass(), aRemoved[r], 0.01) << "r = " << aRadii[r];
++  }
++}
+diff --git a/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_rim_after_corner b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_rim_after_corner
+new file mode 100644
+index 000000000..3d7322fb2
+--- /dev/null
++++ b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_rim_after_corner
+@@ -0,0 +1,40 @@
++puts "============"
++puts "Modeling Algorithms - Fillet of a rim of a square hole around a filleted corner of the hole"
++puts "(FreeCAD issue 20085: cube 20 with fillets of radius 6, square hole 8 x 8)"
++puts "============"
++puts ""
++
++# A vertical (concave) edge of the hole and the two upper edges at it are
++# filleted first (Fillet001 in FreeCAD), then a lower edge of the hole next to
++# that vertical edge (Fillet002). The spine of the second fillet goes on along
++# the edge of the first one at the bottom of the hole and along the next lower
++# edge: the fillet goes round the corner of the hole. At its ends it crosses
++# several faces on the other edges of its spine, and its ends were taken for
++# ends crossing smooth edges and closed by plates (tolerance 9.5).
++restore [locate_data_file freecad20085_rounded_cube_pocket.brep] b
++explode b E
++
++foreach {r tol vol} {1 0.0137 5150.04 2 0.0702 5114.92} {
++  blend r1 b $r b_26 $r b_13 $r b_35
++
++  # the lower edge on the wall y = -4, shortened by the first fillet
++  set e2 ""
++  foreach e [explode r1 E] {
++    set bb [bounding $e]
++    if {abs([lindex $bb 1] + 4.) < 1.e-3 && abs([lindex $bb 4] + 4.) < 1.e-3
++        && abs([lindex $bb 2] + 10.) < 1.e-3 && abs([lindex $bb 5] + 10.) < 1.e-3
++        && [lindex $bb 3] - [lindex $bb 0] > 4.} {
++      set e2 $e
++    }
++  }
++  if {$e2 == ""} {
++    puts "Error: r = $r, the lower edge is not found"
++    continue
++  }
++  blend result r1 $r $e2
++
++  checkshape result
++  # the tolerance is the one of the corner of the first fillets
++  checkmaxtol result -ref $tol
++  checkprops result -v $vol
++}
+-- 
+2.43.0
+

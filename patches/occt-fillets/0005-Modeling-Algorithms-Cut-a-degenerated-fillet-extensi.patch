@@ -1,0 +1,204 @@
+From 4acc954666d54f7d101bc0b3d37474d67283c3fb Mon Sep 17 00:00:00 2001
+From: Kuzma30 <kuzemkoa@gmail.com>
+Date: Mon, 26 Oct 2026 10:09:17 +0200
+Subject: [PATCH 05/24] Modeling Algorithms - Cut a degenerated fillet
+ extension before approximation
+
+At a corner the spine is extended beyond its end, and the walking goes on
+over the extrapolated faces. When these faces diverge, as on a thread cut
+along a helix (FreeCAD issue 32486), the section opens up to a half circle
+and the walking crawls towards that point. The approximation of such a line
+fails or gives a surface with weights out of range, and the whole fillet
+fails.
+
+If the approximation fails, cut the extension where the chord of the
+section moves away by more than 10% from its value at the end of the spine,
+and approximate again. End points of the data that were cut off are reset.
+Lines that are approximated now are not changed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
+---
+ .../TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx     | 145 +++++++++++++++++-
+ 1 file changed, 143 insertions(+), 2 deletions(-)
+
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx
+index d0507d888..50b8fe6b9 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx
+@@ -1505,6 +1505,91 @@ bool ChFi3d_FilBuilder::PerformFirstSection(const occ::handle<ChFiDS_Spine>&
+ 
+ //=================================================================================================
+ 
++static double SectionChord(const Blend_Point& thePnt)
++{
++  // The walking may go on past the ends of the spine, over the
++  // extrapolated faces. When these faces diverge, the section
++  // opens up towards a half circle and the line can no longer be
++  // approximated. Cut the extension at the point where the chord
++  // of the section starts to move away from its value at the end
++  // of the spine.
++  return thePnt.PointOnS1().Distance(thePnt.PointOnS2());
++}
++
++static bool TrimDegeneratedExtension(const occ::handle<BRepBlend_Line>& theLine,
++                                     const double                       theSpFirst,
++                                     const double                       theSpLast,
++                                     bool&                              theTrimmedFirst,
++                                     bool&                              theTrimmedLast)
++{
++  theTrimmedFirst = theTrimmedLast = false;
++  const double aMaxDrift           = 0.1; // relative change of the chord
++  const double aTol                = Precision::PConfusion();
++  bool         isTrimmed           = false;
++  double       aU, aV;
++
++  int aNb = theLine->NbPoints();
++  if (aNb > 3 && theLine->Point(1).Parameter() < theSpFirst - aTol)
++  {
++    int anIn = 1;
++    while (anIn < aNb && theLine->Point(anIn).Parameter() < theSpFirst - aTol)
++    {
++      anIn++;
++    }
++    const double aRef  = SectionChord(theLine->Point(anIn));
++    int          aKeep = aRef > Precision::Confusion() ? anIn : 1;
++    while (aKeep > 1
++           && std::abs(SectionChord(theLine->Point(aKeep - 1)) - aRef) <= aMaxDrift * aRef)
++    {
++      aKeep--;
++    }
++    if (aKeep > 1 && aNb - aKeep >= 2)
++    {
++      theLine->Remove(1, aKeep - 1);
++      const Blend_Point&  aP = theLine->Point(1);
++      BRepBlend_Extremity anExt1, anExt2;
++      aP.ParametersOnS1(aU, aV);
++      anExt1.SetValue(aP.PointOnS1(), aU, aV, Precision::Confusion());
++      aP.ParametersOnS2(aU, aV);
++      anExt2.SetValue(aP.PointOnS2(), aU, aV, Precision::Confusion());
++      theLine->SetStartPoints(anExt1, anExt2);
++      isTrimmed = theTrimmedFirst = true;
++    }
++  }
++
++  aNb = theLine->NbPoints();
++  if (aNb > 3 && theLine->Point(aNb).Parameter() > theSpLast + aTol)
++  {
++    int anIn = aNb;
++    while (anIn > 1 && theLine->Point(anIn).Parameter() > theSpLast + aTol)
++    {
++      anIn--;
++    }
++    const double aRef  = SectionChord(theLine->Point(anIn));
++    int          aKeep = aRef > Precision::Confusion() ? anIn : aNb;
++    while (aKeep < aNb
++           && std::abs(SectionChord(theLine->Point(aKeep + 1)) - aRef) <= aMaxDrift * aRef)
++    {
++      aKeep++;
++    }
++    if (aKeep < aNb && aKeep >= 3)
++    {
++      theLine->Remove(aKeep + 1, aNb);
++      const Blend_Point&  aP = theLine->Point(aKeep);
++      BRepBlend_Extremity anExt1, anExt2;
++      aP.ParametersOnS1(aU, aV);
++      anExt1.SetValue(aP.PointOnS1(), aU, aV, Precision::Confusion());
++      aP.ParametersOnS2(aU, aV);
++      anExt2.SetValue(aP.PointOnS2(), aU, aV, Precision::Confusion());
++      theLine->SetEndPoints(anExt1, anExt2);
++      isTrimmed = theTrimmedLast = true;
++    }
++  }
++  return isTrimmed;
++}
++
++//=================================================================================================
++
+ bool ChFi3d_FilBuilder::PerformSurf(NCollection_Sequence<occ::handle<ChFiDS_SurfData>>& SeqData,
+                                     const occ::handle<ChFiDS_ElSpine>&                  HGuide,
+                                     const occ::handle<ChFiDS_Spine>&                    Spine,
+@@ -1545,6 +1630,62 @@ bool ChFi3d_FilBuilder::PerformSurf(NCollection_Sequence<occ::handle<ChFiDS_Surf
+   {
+     Last = fsp->LastParameter(fsp->NbEdges());
+   }
++  // Approximates the walked line. If this fails, a degenerated extension
++  // past an end of the spine is cut off and the approximation is retried.
++  auto aCompleteData = [&](Blend_Function& theFunc) -> bool {
++    try
++    {
++      if (CompleteData(Data, theFunc, lin, S1, S2, Or, gd1, gd2, gf1, gf2))
++      {
++        return true;
++      }
++    }
++    catch (Standard_ConstructionError const&)
++    {
++      // Weights of the approximated surface out of range.
++    }
++    bool isTrimmedFirst = false, isTrimmedLast = false;
++    if (!TrimDegeneratedExtension(lin,
++                                  fsp->FirstParameter(1),
++                                  fsp->LastParameter(fsp->NbEdges()),
++                                  isTrimmedFirst,
++                                  isTrimmedLast))
++    {
++      return false;
++    }
++    // An end point kept in the data must still lie on the line; a point
++    // that was cut off is dropped and that end becomes free.
++    const double aTolPar = Precision::PConfusion();
++    if (isTrimmedFirst)
++    {
++      const double aNewFirst = lin->Point(1).Parameter();
++      if (gd1 && Data->VertexFirstOnS1().Parameter() < aNewFirst - aTolPar)
++      {
++        gd1 = false;
++        Data->ChangeVertexFirstOnS1().Reset();
++      }
++      if (gd2 && Data->VertexFirstOnS2().Parameter() < aNewFirst - aTolPar)
++      {
++        gd2 = false;
++        Data->ChangeVertexFirstOnS2().Reset();
++      }
++    }
++    if (isTrimmedLast)
++    {
++      const double aNewLast = lin->Point(lin->NbPoints()).Parameter();
++      if (gf1 && Data->VertexLastOnS1().Parameter() > aNewLast + aTolPar)
++      {
++        gf1 = false;
++        Data->ChangeVertexLastOnS1().Reset();
++      }
++      if (gf2 && Data->VertexLastOnS2().Parameter() > aNewLast + aTolPar)
++      {
++        gf2 = false;
++        Data->ChangeVertexLastOnS2().Reset();
++      }
++    }
++    return CompleteData(Data, theFunc, lin, S1, S2, Or, gd1, gd2, gf1, gf2);
++  };
+   if (fsp->IsConstant())
+   {
+     BRepBlend_ConstRad    Func(S1, S2, HGuide);
+@@ -1587,7 +1728,7 @@ bool ChFi3d_FilBuilder::PerformSurf(NCollection_Sequence<occ::handle<ChFiDS_Surf
+       return false; // recovery is possible PMN 14/05/1998
+     }
+ 
+-    done = CompleteData(Data, Func, lin, S1, S2, Or, gd1, gd2, gf1, gf2);
++    done = aCompleteData(Func);
+ 
+     if (!done)
+     {
+@@ -1637,7 +1778,7 @@ bool ChFi3d_FilBuilder::PerformSurf(NCollection_Sequence<occ::handle<ChFiDS_Surf
+       return false;
+     }
+ 
+-    done = CompleteData(Data, Func, lin, S1, S2, Or, gd1, gd2, gf1, gf2);
++    done = aCompleteData(Func);
+ 
+     if (!done)
+     {
+-- 
+2.43.0
+

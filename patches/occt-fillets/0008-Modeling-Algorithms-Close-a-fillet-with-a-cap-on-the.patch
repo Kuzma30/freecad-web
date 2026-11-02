@@ -1,0 +1,920 @@
+From 3f6cc781953db46c4160b7f43837fded6d0a0f37 Mon Sep 17 00:00:00 2001
+From: Kuzma30 <kuzemkoa@gmail.com>
+Date: Mon, 26 Oct 2026 10:09:17 +0200
+Subject: [PATCH 08/24] Modeling Algorithms - Close a fillet with a cap on the
+ face at its end
+
+At a vertex with more than three edges, the end of a single fillet was
+built by PerformIntersectionAtEnd, which intersects the fillet with every
+face around the vertex. When the faces between the two support faces do
+not reach the fillet (the corner of a pocket whose walls have chamfered
+edges, FreeCAD issue 31894), it fell back to a plate patch, which only
+approximates the corner.
+
+There the fillet is cut across by the face beyond the arc where one of its
+sides leaves the support. PerformCapOnEndFace detects this case before
+anything is stored: the face at end does not share an edge with the
+opposite support face at the vertex, the fillet on the opposite face
+reaches it (at the end of its trace at this vertex and at its middle; the
+other end may stop at another such face, as for a torus capped at both
+ends), and no edge at the vertex outside the two support faces meets the
+fillet. The corner is then built by PerformOneCorner as in the OnSame
+state: the face at end is extended up to the fillet, and the opposite face
+is limited by its intersection with the face at end, started at the vertex
+itself since there is no edge to prolong. The orientation of that curve,
+which came from the prolonged edge, is computed from the sides of the
+faces to keep, at the point of the curve nearest to an inside point.
+
+The face at end may be any surface; the side of the surface is found by
+projection. When the direction of the cap curve at the vertex follows an
+edge of the opposite face, the cap would only double that edge (the end
+face of FreeCAD issue 27807 meets the opposite face on its boundary), so
+such a vertex keeps the old way. The normal of a face at the vertex is
+taken only for a face that reaches the vertex.
+
+Tests bugs/modalg_8/fillet_cap_on_cylinder_at_pocket_corner and
+fillet_torus_capped_at_pocket_walls; GTests for the planar case.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
+---
+ .../TKFillet/ChFi3d/ChFi3d_Builder.cxx        |   5 +-
+ .../TKFillet/ChFi3d/ChFi3d_Builder.hxx        |  18 +-
+ .../TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx     | 555 +++++++++++++++---
+ .../GTests/BRepFilletAPI_MakeFillet_Test.cxx  |  78 +++
+ .../fillet_cap_on_cylinder_at_pocket_corner   |  19 +
+ .../fillet_torus_capped_at_pocket_walls       |  17 +
+ 6 files changed, 595 insertions(+), 97 deletions(-)
+ create mode 100644 tests/bugs/modalg_8/fillet_cap_on_cylinder_at_pocket_corner
+ create mode 100644 tests/bugs/modalg_8/fillet_torus_capped_at_pocket_walls
+
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
+index 5c3d5db2c..b9acdf589 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
+@@ -665,7 +665,10 @@ void ChFi3d_Builder::PerformFilletOnVertex(const int Index)
+         }
+         if (nba > 3)
+         {
+-          PerformIntersectionAtEnd(Index);
++          if (!PerformCapOnEndFace(Index))
++          {
++            PerformIntersectionAtEnd(Index);
++          }
+         }
+         else
+         {
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
+index ab5614b1a..acf56ca73 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
+@@ -777,7 +777,23 @@ private:
+ 
+   Standard_EXPORT void PerformSingularCorner(const int Index);
+ 
+-  Standard_EXPORT void PerformOneCorner(const int Index, const bool PrepareOnSame = false);
++  //! Builds the corner at the end of a single fillet. A non-zero
++  //! theCapFadArc (1 or 2) closes the fillet on the face across the arc
++  //! reached on that side, as in the OnSame state, even when the opposite
++  //! face does not share an edge with it at the vertex.
++  //! @param[in] Index index of the vertex in the map of vertices and stripes
++  //! @param[in] PrepareOnSame only redefine the parameter of the OnSame stripe on its arc
++  //! @param[in] theCapFadArc 0, or the side (1 or 2) closed on the face across its arc
++  Standard_EXPORT void PerformOneCorner(const int  Index,
++                                        const bool PrepareOnSame = false,
++                                        const int  theCapFadArc  = 0);
++
++  //! Closes the end of a single fillet at a vertex with more than three
++  //! edges on the face across one of its arcs, when that face cuts the
++  //! fillet across. Returns false, and changes nothing, otherwise.
++  //! @param[in] theIndex index of the vertex in the map of vertices and stripes
++  //! @return false, with nothing changed, when the configuration is another
++  Standard_EXPORT bool PerformCapOnEndFace(const int theIndex);
+ 
+   Standard_EXPORT void IntersectMoreCorner(const int Index);
+ 
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
+index 2afbc1ab5..a364f0dda 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
+@@ -285,6 +285,172 @@ static bool Update(const occ::handle<Adaptor3d_Surface>& fb,
+ //           <Vtx> is a corner vertex
+ //=======================================================================
+ 
++static bool IsEdgeOfFace(const TopoDS_Edge& theEdge, const TopoDS_Face& theFace)
++{
++  for (TopExp_Explorer anExp(theFace, TopAbs_EDGE); anExp.More(); anExp.Next())
++  {
++    if (anExp.Current().IsSame(theEdge))
++    {
++      return true;
++    }
++  }
++  return false;
++}
++
++//=================================================================================================
++
++// Signed distance from a point to the surface of a face, positive on the side
++// of the normal. For a plane it is exact; otherwise the point is projected.
++static bool SideOfSurface(const BRepAdaptor_Surface& theSurf, const gp_Pnt& theP, double& theDist)
++{
++  if (theSurf.GetType() == GeomAbs_Plane)
++  {
++    theDist = theSurf.Plane().SignedDistance(theP);
++    return true;
++  }
++  Extrema_ExtPS anExt(theP,
++                      theSurf,
++                      Precision::PConfusion(),
++                      Precision::PConfusion(),
++                      Extrema_ExtFlag_MIN);
++  if (!anExt.IsDone() || anExt.NbExt() == 0)
++  {
++    return false;
++  }
++  int    aBest = 1;
++  double aMin  = anExt.SquareDistance(1);
++  for (int i = 2; i <= anExt.NbExt(); ++i)
++  {
++    if (anExt.SquareDistance(i) < aMin)
++    {
++      aMin  = anExt.SquareDistance(i);
++      aBest = i;
++    }
++  }
++  double u, v;
++  anExt.Point(aBest).Parameter(u, v);
++  gp_Pnt aP;
++  gp_Vec aDU, aDV;
++  theSurf.D1(u, v, aP, aDU, aDV);
++  const gp_Vec aN = aDU.Crossed(aDV);
++  if (aN.SquareMagnitude() < gp::Resolution())
++  {
++    return false;
++  }
++  theDist = gp_Vec(aP, theP).Dot(aN) / aN.Magnitude();
++  return true;
++}
++
++//=================================================================================================
++
++// Normal of a face at its vertex, oriented as the face.
++static bool NormalAtVertex(const TopoDS_Face& theFace, const TopoDS_Vertex& theV, gp_Dir& theN)
++{
++  // The fillet may end on a support face that does not reach the vertex.
++  bool isOnFace = false;
++  for (TopExp_Explorer anExp(theFace, TopAbs_VERTEX); anExp.More() && !isOnFace; anExp.Next())
++  {
++    isOnFace = anExp.Current().IsSame(theV);
++  }
++  if (!isOnFace)
++  {
++    return false;
++  }
++  const gp_Pnt2d      aUV = BRep_Tool::Parameters(theV, theFace);
++  BRepAdaptor_Surface aS(theFace, false);
++  gp_Pnt              aP;
++  gp_Vec              aDU, aDV;
++  aS.D1(aUV.X(), aUV.Y(), aP, aDU, aDV);
++  const gp_Vec aN = aDU.Crossed(aDV);
++  if (aN.SquareMagnitude() < gp::Resolution())
++  {
++    return false;
++  }
++  theN = aN;
++  if (theFace.Orientation() == TopAbs_REVERSED)
++  {
++    theN.Reverse();
++  }
++  return true;
++}
++
++// True if the intersection of theFv and theFop leaves the vertex away from
++// the edges of theFop there.
++static bool CapLeavesEdgesOfFace(const TopoDS_Face&                    theFv,
++                                 const TopoDS_Face&                    theFop,
++                                 const TopoDS_Vertex&                  theV,
++                                 const NCollection_List<TopoDS_Shape>& theVEdges)
++{
++  gp_Dir aNv, aNop;
++  if (!NormalAtVertex(theFv, theV, aNv) || !NormalAtVertex(theFop, theV, aNop))
++  {
++    return false;
++  }
++  const gp_Vec aDir = gp_Vec(aNv).Crossed(gp_Vec(aNop));
++  if (aDir.Magnitude() < 1.e-3)
++  {
++    return false; // the faces are tangent at the vertex
++  }
++  const double anAngTol = 1.e-3;
++  for (NCollection_List<TopoDS_Shape>::Iterator anIt(theVEdges); anIt.More(); anIt.Next())
++  {
++    const TopoDS_Edge& anEdge = TopoDS::Edge(anIt.Value());
++    if (BRep_Tool::Degenerated(anEdge) || !IsEdgeOfFace(anEdge, theFop))
++    {
++      continue;
++    }
++    BRepAdaptor_Curve aC(anEdge);
++    gp_Pnt            aP;
++    gp_Vec            aT;
++    aC.D1(BRep_Tool::Parameter(theV, anEdge), aP, aT);
++    if (aT.SquareMagnitude() < gp::Resolution())
++    {
++      return false;
++    }
++    if (aT.IsParallel(aDir, anAngTol))
++    {
++      return false;
++    }
++  }
++  return true;
++}
++
++//=================================================================================================
++
++// Orientation of a curve that starts at the corner vertex on a face: FORWARD
++// if the part of the face to keep, on the side of theInside, is on its left.
++static TopAbs_Orientation OrientationFromSide(const occ::handle<Geom2d_Curve>& theCurve,
++                                              const gp_Pnt2d&                  theInside)
++{
++  // The side is taken at the point of the curve nearest to theInside: on a
++  // curved section (a cap on a cylinder) the tangent at the middle may leave
++  // a point near the end of the curve on the wrong side.
++  double aPar = 0.5 * (theCurve->FirstParameter() + theCurve->LastParameter());
++  Geom2dAPI_ProjectPointOnCurve aProj(theInside,
++                                      theCurve,
++                                      theCurve->FirstParameter(),
++                                      theCurve->LastParameter());
++  if (aProj.NbPoints() > 0)
++  {
++    aPar = aProj.LowerDistanceParameter();
++  }
++  else if (theInside.Distance(theCurve->Value(theCurve->FirstParameter()))
++           < theInside.Distance(theCurve->Value(theCurve->LastParameter())))
++  {
++    aPar = theCurve->FirstParameter();
++  }
++  else
++  {
++    aPar = theCurve->LastParameter();
++  }
++  gp_Pnt2d aP;
++  gp_Vec2d aD;
++  theCurve->D1(aPar, aP, aD);
++  return aD.Crossed(gp_Vec2d(aP, theInside)) > 0. ? TopAbs_FORWARD : TopAbs_REVERSED;
++}
++
++//=================================================================================================
++
+ static bool IntersUpdateOnSame(occ::handle<GeomAdaptor_Surface>& HGs,
+                                occ::handle<BRepAdaptor_Surface>& HBs,
+                                const occ::handle<Geom_Curve>&    c3dFI,
+@@ -319,7 +485,7 @@ static bool IntersUpdateOnSame(occ::handle<GeomAdaptor_Surface>& HGs,
+     return true;
+   }
+ 
+-  if (!ChFi3d::IsTangentFaces(Eprol, Fprol, Fop))
++  if (Eprol.IsNull() || !ChFi3d::IsTangentFaces(Eprol, Fprol, Fop))
+   {
+     return false;
+   }
+@@ -604,7 +770,9 @@ bool ChFi3d_SelectStripe(NCollection_List<occ::handle<ChFiDS_Stripe>>::Iterator&
+ //           (eap, Arp 9 2002, occ266)
+ //=======================================================================
+ 
+-void ChFi3d_Builder::PerformOneCorner(const int Index, const bool thePrepareOnSame)
++void ChFi3d_Builder::PerformOneCorner(const int  Index,
++                                      const bool thePrepareOnSame,
++                                      const int  theCapFadArc)
+ {
+   TopOpeBRepDS_DataStructure& DStr = myDS->ChangeDS();
+ 
+@@ -662,7 +830,9 @@ void ChFi3d_Builder::PerformOneCorner(const int Index, const bool thePrepareOnSa
+   {
+     stat = spine->LastStatus();
+   }
+-  bool        onsame = (stat == ChFiDS_OnSame);
++  // theCapFadArc != 0: the corner is closed on the face across the arc of
++  // that side, as in the OnSame case, whatever the state at the vertex.
++  bool        onsame = (stat == ChFiDS_OnSame) || theCapFadArc != 0;
+   TopoDS_Face Fv, Fad, Fop;
+   TopoDS_Edge Arcpiv, Arcprol, Arcspine;
+   if (isfirst)
+@@ -694,83 +864,73 @@ void ChFi3d_Builder::PerformOneCorner(const int Index, const bool thePrepareOnSa
+ 
+   if (onsame)
+   {
+-    if (!CV1.IsOnArc() && !CV2.IsOnArc())
+-    {
+-      throw Standard_ConstructionError("Corner OnSame : no point on arc");
+-    }
+-    else if (CV1.IsOnArc() && CV2.IsOnArc())
++    if (theCapFadArc != 0)
+     {
+-      bool sur1 = false, sur2 = false;
+-      for (ex.Init(CV1.Arc(), TopAbs_VERTEX); ex.More(); ex.Next())
++      IFadArc = theCapFadArc;
++      IFopArc = 3 - IFadArc;
++      Arcpiv  = Fd->Vertex(isfirst, IFadArc).Arc();
++      Fad     = TopoDS::Face(DStr.Shape(Fd->Index(IFadArc)));
++      Fop     = TopoDS::Face(DStr.Shape(Fd->Index(IFopArc)));
++      for (NCollection_List<TopoDS_Shape>::Iterator It(myEFMap(Arcpiv)); It.More(); It.Next())
+       {
+-        if (Vtx.IsSame(ex.Current()))
++        if (!Fad.IsSame(It.Value()))
+         {
+-          sur1 = true;
++          Fv = TopoDS::Face(It.Value());
+           break;
+         }
+       }
+-      for (ex.Init(CV2.Arc(), TopAbs_VERTEX); ex.More(); ex.Next())
++    }
++    else
++    {
++      if (!CV1.IsOnArc() && !CV2.IsOnArc())
+       {
+-        if (Vtx.IsSame(ex.Current()))
+-        {
+-          sur2 = true;
+-          break;
+-        }
++        throw Standard_ConstructionError("Corner OnSame : no point on arc");
+       }
+-      if (sur1 && sur2)
++      else if (CV1.IsOnArc() && CV2.IsOnArc())
+       {
+-        TopoDS_Edge E[3];
+-        E[0] = CV1.Arc();
+-        E[1] = CV2.Arc();
+-        E[2] = Arcspine;
+-        if (ChFi3d_EdgeState(E, myEFMap) != ChFiDS_OnDiff)
++        bool sur1 = false, sur2 = false;
++        for (ex.Init(CV1.Arc(), TopAbs_VERTEX); ex.More(); ex.Next())
++        {
++          if (Vtx.IsSame(ex.Current()))
++          {
++            sur1 = true;
++            break;
++          }
++        }
++        for (ex.Init(CV2.Arc(), TopAbs_VERTEX); ex.More(); ex.Next())
++        {
++          if (Vtx.IsSame(ex.Current()))
++          {
++            sur2 = true;
++            break;
++          }
++        }
++        if (sur1 && sur2)
++        {
++          TopoDS_Edge E[3];
++          E[0] = CV1.Arc();
++          E[1] = CV2.Arc();
++          E[2] = Arcspine;
++          if (ChFi3d_EdgeState(E, myEFMap) != ChFiDS_OnDiff)
++          {
++            IFadArc = 2;
++          }
++        }
++        else if (sur2)
+         {
+           IFadArc = 2;
+         }
+       }
+-      else if (sur2)
++      else if (CV2.IsOnArc())
+       {
+         IFadArc = 2;
+       }
+-    }
+-    else if (CV2.IsOnArc())
+-    {
+-      IFadArc = 2;
+-    }
+-    IFopArc = 3 - IFadArc;
+-
+-    Arcpiv = Fd->Vertex(isfirst, IFadArc).Arc();
+-    Fad    = TopoDS::Face(DStr.Shape(Fd->Index(IFadArc)));
+-    Fop    = TopoDS::Face(DStr.Shape(Fd->Index(IFopArc)));
+-    NCollection_List<TopoDS_Shape>::Iterator It;
+-    // The face at end is returned without check of its unicity.
+-    for (It.Initialize(myEFMap(Arcpiv)); It.More(); It.Next())
+-    {
+-      if (!Fad.IsSame(It.Value()))
+-      {
+-        Fv = TopoDS::Face(It.Value());
+-        break;
+-      }
+-    }
++      IFopArc = 3 - IFadArc;
+ 
+-    // Does the face at bout contain the Vertex ?
+-    bool isinface = false;
+-    for (ex.Init(Fv, TopAbs_VERTEX); ex.More(); ex.Next())
+-    {
+-      if (ex.Current().IsSame(Vtx))
+-      {
+-        isinface = true;
+-        break;
+-      }
+-    }
+-    if (!isinface && Fd->Vertex(isfirst, 3 - IFadArc).IsOnArc())
+-    {
+-      IFadArc = 3 - IFadArc;
+-      IFopArc = 3 - IFopArc;
+-      Arcpiv  = Fd->Vertex(isfirst, IFadArc).Arc();
+-      Fad     = TopoDS::Face(DStr.Shape(Fd->Index(IFadArc)));
+-      Fop     = TopoDS::Face(DStr.Shape(Fd->Index(IFopArc)));
+-      // NCollection_List<TopoDS_Shape>::Iterator It;
++      Arcpiv = Fd->Vertex(isfirst, IFadArc).Arc();
++      Fad    = TopoDS::Face(DStr.Shape(Fd->Index(IFadArc)));
++      Fop    = TopoDS::Face(DStr.Shape(Fd->Index(IFopArc)));
++      NCollection_List<TopoDS_Shape>::Iterator It;
+       // The face at end is returned without check of its unicity.
+       for (It.Initialize(myEFMap(Arcpiv)); It.More(); It.Next())
+       {
+@@ -780,8 +940,36 @@ void ChFi3d_Builder::PerformOneCorner(const int Index, const bool thePrepareOnSa
+           break;
+         }
+       }
+-    }
+ 
++      // Does the face at bout contain the Vertex ?
++      bool isinface = false;
++      for (ex.Init(Fv, TopAbs_VERTEX); ex.More(); ex.Next())
++      {
++        if (ex.Current().IsSame(Vtx))
++        {
++          isinface = true;
++          break;
++        }
++      }
++      if (!isinface && Fd->Vertex(isfirst, 3 - IFadArc).IsOnArc())
++      {
++        IFadArc = 3 - IFadArc;
++        IFopArc = 3 - IFopArc;
++        Arcpiv  = Fd->Vertex(isfirst, IFadArc).Arc();
++        Fad     = TopoDS::Face(DStr.Shape(Fd->Index(IFadArc)));
++        Fop     = TopoDS::Face(DStr.Shape(Fd->Index(IFopArc)));
++        // NCollection_List<TopoDS_Shape>::Iterator It;
++        // The face at end is returned without check of its unicity.
++        for (It.Initialize(myEFMap(Arcpiv)); It.More(); It.Next())
++        {
++          if (!Fad.IsSame(It.Value()))
++          {
++            Fv = TopoDS::Face(It.Value());
++            break;
++          }
++        }
++      }
++    }
+     if (Fv.IsNull())
+     {
+       throw StdFail_NotDone("OneCorner : face at end not found");
+@@ -792,6 +980,7 @@ void ChFi3d_Builder::PerformOneCorner(const int Index, const bool thePrepareOnSa
+     Fop.Orientation(TopAbs_FORWARD);
+ 
+     // The edge that will be extended is returned.
++    NCollection_List<TopoDS_Shape>::Iterator It;
+     for (It.Initialize(myVEMap(Vtx)); It.More() && Arcprol.IsNull(); It.Next())
+     {
+       if (!Arcpiv.IsSame(It.Value()))
+@@ -800,6 +989,11 @@ void ChFi3d_Builder::PerformOneCorner(const int Index, const bool thePrepareOnSa
+         {
+           if (It.Value().IsSame(ex.Current()))
+           {
++            // closing on the face at end, the edge must also bound Fop
++            if (theCapFadArc != 0 && !IsEdgeOfFace(TopoDS::Edge(It.Value()), Fop))
++            {
++              continue;
++            }
+             Arcprol   = TopoDS::Edge(It.Value());
+             OArcprolv = ex.Current().Orientation();
+             break;
+@@ -807,7 +1001,9 @@ void ChFi3d_Builder::PerformOneCorner(const int Index, const bool thePrepareOnSa
+         }
+       }
+     }
+-    if (Arcprol.IsNull()) /*throw StdFail_NotDone("OneCorner : edge a prolonger non trouve");*/
++    // Without such an edge (Fv and Fop do not meet at the vertex), the
++    // limit of Fop is the intersection of Fop with Fv, started at the vertex.
++    if (Arcprol.IsNull() && theCapFadArc == 0)
+     {
+       PerformIntersectionAtEnd(Index);
+       return;
+@@ -1432,43 +1628,53 @@ void ChFi3d_Builder::PerformOneCorner(const int Index, const bool thePrepareOnSa
+     DStr.ChangeShapeInterferences(IArcspine).Append(interfv);
+ 
+     // Now the missing curves are constructed.
+-    TopoDS_Vertex V2;
+-    for (ex.Init(Arcprol.Oriented(TopAbs_FORWARD), TopAbs_VERTEX); ex.More(); ex.Next())
++    const bool                     isVirtualProl = Arcprol.IsNull();
++    const ChFiDS_FaceInterference& Fiop          = Fd->Interference(IFopArc);
++    gp_Pnt2d                       pop1, pop2, pv1, pv2;
++    TopoDS_Vertex                  V2;
++    if (isVirtualProl)
+     {
+-      if (Vtx.IsSame(ex.Current()))
+-      {
+-        OVtx = ex.Current().Orientation();
+-      }
+-      else
++      // the curve starts at the vertex itself
++      pop1 = BRep_Tool::Parameters(Vtx, Fop);
++      pv1  = BRep_Tool::Parameters(Vtx, Fv);
++    }
++    else
++    {
++      for (ex.Init(Arcprol.Oriented(TopAbs_FORWARD), TopAbs_VERTEX); ex.More(); ex.Next())
+       {
+-        V2 = TopoDS::Vertex(ex.Current());
++        if (Vtx.IsSame(ex.Current()))
++        {
++          OVtx = ex.Current().Orientation();
++        }
++        else
++        {
++          V2 = TopoDS::Vertex(ex.Current());
++        }
+       }
+-    }
+ 
+-    occ::handle<Geom2d_Curve> Hc;
++      occ::handle<Geom2d_Curve> Hc;
+ #ifdef VARIANT1
+-    parVtx = BRep_Tool::Parameter(Vtx, Arcprol);
++      parVtx = BRep_Tool::Parameter(Vtx, Arcprol);
+ #else
+-    parVtx = BRep_Tool::Parameter(V2, Arcprol);
++      parVtx = BRep_Tool::Parameter(V2, Arcprol);
+ #endif
+-    const ChFiDS_FaceInterference& Fiop = Fd->Interference(IFopArc);
+-    gp_Pnt2d                       pop1, pop2, pv1, pv2;
+-    // Arcprol may be a seam-type edge that Fop uses only once (a body cut along
+-    // the seam). Take the pcurve of the occurrence that is really in Fop.
+-    Hc = BRep_Tool::CurveOnSurface(TopoDS::Edge(Arcprol.Oriented(OArcprolop)), Fop, Ubid, Ubid);
+-    if (Hc.IsNull())
+-    {
+-      throw Standard_ConstructionError("Failed to get p-curve of edge");
++      // Arcprol may be a seam-type edge that Fop uses only once (a body cut along
++      // the seam). Take the pcurve of the occurrence that is really in Fop.
++      Hc = BRep_Tool::CurveOnSurface(TopoDS::Edge(Arcprol.Oriented(OArcprolop)), Fop, Ubid, Ubid);
++      if (Hc.IsNull())
++      {
++        throw Standard_ConstructionError("Failed to get p-curve of edge");
++      }
++      pop1 = Hc->Value(parVtx);
++      Hc   = BRep_Tool::CurveOnSurface(Arcprol, Fv, Ubid, Ubid);
++      if (Hc.IsNull())
++      {
++        throw Standard_ConstructionError("Failed to get p-curve of edge");
++      }
++      pv1 = Hc->Value(parVtx);
+     }
+-    pop1 = Hc->Value(parVtx);
+     pop2 = Fiop.PCurveOnFace()->Value(Fiop.Parameter(isfirst));
+-    Hc   = BRep_Tool::CurveOnSurface(Arcprol, Fv, Ubid, Ubid);
+-    if (Hc.IsNull())
+-    {
+-      throw Standard_ConstructionError("Failed to get p-curve of edge");
+-    }
+-    pv1 = Hc->Value(parVtx);
+-    pv2 = p2dbout;
++    pv2  = p2dbout;
+     ChFi3d_Recale(Bs, pv1, pv2, true);
+     NCollection_Array1<double> Pardeb(1, 4), Parfin(1, 4);
+     Pardeb(1) = pop1.X();
+@@ -1551,6 +1757,10 @@ void ChFi3d_Builder::PerformOneCorner(const int Index, const bool thePrepareOnSa
+         }
+       }
+     }
++    if (intcouture && isVirtualProl)
++    {
++      throw Standard_NotImplemented("OneCorner : seam on the face limited at the vertex");
++    }
+     if (intcouture)
+     {
+ 
+@@ -1608,11 +1818,30 @@ void ChFi3d_Builder::PerformOneCorner(const int Index, const bool thePrepareOnSa
+     }
+     else
+     {
+-      Et = TopAbs::Reverse(TopAbs::Compose(OVtx, OArcprolv));
++      TopAbs_Orientation anEtV  = TopAbs::Reverse(TopAbs::Compose(OVtx, OArcprolv));
++      TopAbs_Orientation anEtOp = TopAbs::Reverse(TopAbs::Compose(OVtx, OArcprolop));
++      if (isVirtualProl)
++      {
++        // On Fv the face is kept towards the point where the fillet leaves
++        // Arcpiv; on Fop it is kept away from the edge of the spine.
++        anEtV = OrientationFromSide(zob2dv,
++                                    CPadArc.IsOnArc()
++                                      ? BRep_Tool::CurveOnSurface(CPadArc.Arc(), Fv, Ubid, Vbid)
++                                          ->Value(CPadArc.ParameterOnArc())
++                                      : pv2);
++        double                          aF, aL;
++        const occ::handle<Geom2d_Curve> aSpineOnOp =
++          BRep_Tool::CurveOnSurface(Arcspine, Fop, aF, aL);
++        const double aParV = BRep_Tool::Parameter(Vtx, Arcspine, Fop);
++        const double aStep =
++          (std::abs(aParV - aF) < std::abs(aL - aParV) ? 0.01 : -0.01) * (aL - aF);
++        anEtOp = TopAbs::Reverse(OrientationFromSide(zob2dop, aSpineOnOp->Value(aParV + aStep)));
++      }
++      Et = anEtV;
+       occ::handle<TopOpeBRepDS_SurfaceCurveInterference> InterFv =
+         ChFi3d_FilCurveInDS(IZob, IShape, zob2dv, Et);
+       DStr.ChangeShapeInterferences(IShape).Append(InterFv);
+-      Et = TopAbs::Reverse(TopAbs::Compose(OVtx, OArcprolop));
++      Et                                                     = anEtOp;
+       int                                                Iop = DStr.AddShape(Fop);
+       occ::handle<TopOpeBRepDS_SurfaceCurveInterference> Interfop =
+         ChFi3d_FilCurveInDS(IZob, Iop, zob2dop, Et);
+@@ -1844,6 +2073,142 @@ static bool IsShrink(const Geom2dAdaptor_Curve& PC,
+ 
+ //=================================================================================================
+ 
++bool ChFi3d_Builder::PerformCapOnEndFace(const int theIndex)
++{
++  // The fillet leaves its support faces across an arc on one side
++  // and its section lies across the plane of the face beyond that
++  // arc. The corner is then that face extended up to the fillet
++  // (a planar cap), the opposite support face being limited by its
++  // intersection with that plane from the vertex. The faces
++  // between the two, and their edges, are not changed.
++  if (myVDataMap(theIndex).Extent() != 1)
++  {
++    return false;
++  }
++  TopOpeBRepDS_DataStructure&         DStr    = myDS->ChangeDS();
++  const TopoDS_Vertex&                Vtx     = myVDataMap.FindKey(theIndex);
++  const occ::handle<ChFiDS_Stripe>&   stripe  = myVDataMap(theIndex).First();
++  int                                 sens    = 0;
++  const int                           num     = ChFi3d_IndexOfSurfData(Vtx, stripe, sens);
++  const bool                          isfirst = (sens == 1);
++  const occ::handle<ChFiDS_SurfData>& Fd      = stripe->SetOfSurfData()->Value(num);
++  if (Fd->IndexOfS1() == 0 || Fd->IndexOfS2() == 0)
++  {
++    return false;
++  }
++
++  const occ::handle<GeomAdaptor_Surface> aFilletSurf =
++    new GeomAdaptor_Surface(DStr.Surface(Fd->Surf()).Surface());
++  for (int aFadArc = 1; aFadArc <= 2; aFadArc++)
++  {
++    const ChFiDS_CommonPoint& aCPad = Fd->Vertex(isfirst, aFadArc);
++    if (!aCPad.IsOnArc())
++    {
++      continue;
++    }
++    const TopoDS_Edge& anArcPiv = aCPad.Arc();
++    if (!TopExp::FirstVertex(anArcPiv).IsSame(Vtx) && !TopExp::LastVertex(anArcPiv).IsSame(Vtx))
++    {
++      continue;
++    }
++    const TopoDS_Face aFad = TopoDS::Face(DStr.Shape(Fd->Index(aFadArc)));
++    const TopoDS_Face aFop = TopoDS::Face(DStr.Shape(Fd->Index(3 - aFadArc)));
++    TopoDS_Face       aFv;
++    for (NCollection_List<TopoDS_Shape>::Iterator anIt(myEFMap(anArcPiv)); anIt.More(); anIt.Next())
++    {
++      if (!aFad.IsSame(anIt.Value()))
++      {
++        aFv = TopoDS::Face(anIt.Value());
++        break;
++      }
++    }
++    if (aFv.IsNull() || aFv.IsSame(aFop))
++    {
++      continue;
++    }
++    BRepAdaptor_Surface aFvSurf(aFv, false);
++
++    // Fv and Fop must not meet at the vertex: that is the plain OnSame case.
++    bool isShared = false;
++    for (NCollection_List<TopoDS_Shape>::Iterator anIt(myVEMap(Vtx)); anIt.More() && !isShared;
++         anIt.Next())
++    {
++      const TopoDS_Edge& anEdge = TopoDS::Edge(anIt.Value());
++      isShared                  = IsEdgeOfFace(anEdge, aFv) && IsEdgeOfFace(anEdge, aFop);
++    }
++    if (isShared)
++    {
++      continue;
++    }
++    bool        hasSeam = false;
++    TopoDS_Edge aSeam;
++    ChFi3d_Couture(aFop, hasSeam, aSeam);
++    if (hasSeam)
++    {
++      continue;
++    }
++
++    // The edges at the vertex between Fv and Fop must stay clear of the
++    // fillet; otherwise the faces between them close it, which is the case
++    // of PerformIntersectionAtEnd.
++    bool isCrossed = false;
++    for (NCollection_List<TopoDS_Shape>::Iterator anIt(myVEMap(Vtx)); anIt.More() && !isCrossed;
++         anIt.Next())
++    {
++      const TopoDS_Edge& anEdge = TopoDS::Edge(anIt.Value());
++      if (BRep_Tool::Degenerated(anEdge) || IsEdgeOfFace(anEdge, aFad)
++          || IsEdgeOfFace(anEdge, aFop))
++      {
++        continue;
++      }
++      IntCurveSurface_HInter anInter;
++      anInter.Perform(new BRepAdaptor_Curve(anEdge), aFilletSurf);
++      isCrossed = anInter.IsDone() && anInter.NbPoints() > 0;
++    }
++    if (isCrossed)
++    {
++      continue;
++    }
++
++    // The cap curve on Fop starts at the vertex along the intersection of Fv
++    // and Fop. If it runs along an edge of Fop there, it would only double
++    // that edge (the end face meets Fop on the boundary of Fop).
++    if (!CapLeavesEdgesOfFace(aFv, aFop, Vtx, myVEMap(Vtx)))
++    {
++      continue;
++    }
++
++    // The fillet must reach the surface of Fv on Fop: the end of its trace
++    // at this vertex and the middle of it lie on the two sides. The other end
++    // is not used, it may stop at another such face (an arc between two
++    // corners).
++    const ChFiDS_FaceInterference& aFiop = Fd->Interference(3 - aFadArc);
++    if (aFiop.LineIndex() == 0)
++    {
++      continue;
++    }
++    const occ::handle<Geom_Curve>& aC3d = DStr.Curve(aFiop.LineIndex()).Curve();
++    if (aC3d.IsNull())
++    {
++      continue;
++    }
++    const double anEnd = aFiop.Parameter(isfirst);
++    const double aMid  = 0.5 * (aFiop.FirstParameter() + aFiop.LastParameter());
++    double       aD1 = 0., aD2 = 0.;
++    if (!SideOfSurface(aFvSurf, aC3d->Value(anEnd), aD1)
++        || !SideOfSurface(aFvSurf, aC3d->Value(aMid), aD2) || aD1 * aD2 > 0.)
++    {
++      continue;
++    }
++
++    PerformOneCorner(theIndex, false, aFadArc);
++    return true;
++  }
++  return false;
++}
++
++//=================================================================================================
++
+ void ChFi3d_Builder::PerformIntersectionAtEnd(const int Index)
+ {
+ 
+diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+index b91ca96f2..383bd475a 100644
+--- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
++++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+@@ -27,7 +27,11 @@
+ #include <BRepFilletAPI_MakeFillet.hxx>
+ #include <BRepGProp.hxx>
+ #include <ChFi3d_FilletShape.hxx>
++#include <BRepAdaptor_Curve.hxx>
++#include <BRepAdaptor_Surface.hxx>
+ #include <BRepPrimAPI_MakeBox.hxx>
++#include <BRepPrimAPI_MakeHalfSpace.hxx>
++#include <gp_Pln.hxx>
+ #include <BRepPrimAPI_MakeCylinder.hxx>
+ #include <BRepPrimAPI_MakePrism.hxx>
+ #include <BRepPrimAPI_MakeRevol.hxx>
+@@ -1143,3 +1147,77 @@ TEST(BRepFilletAPI_MakeFilletTest, SquareHoleFlushWithRoundedEdges_KeepsCornersL
+   EXPECT_GT(aRemoved, 5.0);
+   EXPECT_LT(aRemoved, 60.0);
+ }
++
++//=================================================================================================
++// Planar cap on the face at the end of a fillet
++
++// The corner of a rectangular pocket in a part whose outer edges along the
++// pocket walls are chamfered at 45 degrees (as in FreeCAD issue 31894). The
++// edge between the wall x = 5 and the chamfer x + z = 5 ends at the pocket
++// corner, where the other wall y = 5 cuts the fillet straight across, but
++// does not meet the chamfer: the face between them is the second chamfer.
++// The corner must be the wall y = 5 extended up to the fillet, with a new
++// straight edge on the chamfer. It was built as a plate patch instead.
++TEST(BRepFilletAPI_MakeFilletTest, PocketCornerOnChamfer_ClosedByPlanarCap)
++{
++  const TopoDS_Shape aBlock =
++    BRepPrimAPI_MakeBox(gp_Pnt(-5.0, -5.0, 0.0), gp_Pnt(15.0, 15.0, 3.0)).Shape();
++  const TopoDS_Face aChamferX =
++    BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(5.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 1.0))).Face();
++  const TopoDS_Face aChamferY =
++    BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0.0, 5.0, 0.0), gp_Dir(0.0, 1.0, 1.0))).Face();
++  const TopoDS_Shape aHalfX =
++    BRepPrimAPI_MakeHalfSpace(aChamferX, gp_Pnt(10.0, 10.0, 10.0)).Solid();
++  const TopoDS_Shape aHalfY =
++    BRepPrimAPI_MakeHalfSpace(aChamferY, gp_Pnt(10.0, 10.0, 10.0)).Solid();
++  const TopoDS_Shape aChamfered =
++    BRepAlgoAPI_Common(BRepAlgoAPI_Common(aBlock, aHalfX).Shape(), aHalfY).Shape();
++  const TopoDS_Shape aPocket =
++    BRepPrimAPI_MakeBox(gp_Pnt(5.0, 5.0, -1.0), gp_Pnt(16.0, 16.0, 4.0)).Shape();
++  const TopoDS_Shape aShape = BRepAlgoAPI_Cut(aChamfered, aPocket).Shape();
++  ASSERT_TRUE(BRepCheck_Analyzer(aShape).IsValid());
++
++  // the edge between the wall x = 5 and the chamfer x + z = 5, from y = 5 to y = 15
++  TopoDS_Edge                                                   aSpine;
++  NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> anEdges;
++  TopExp::MapShapes(aShape, TopAbs_EDGE, anEdges);
++  for (int i = 1; i <= anEdges.Extent(); ++i)
++  {
++    GProp_GProps aProps;
++    BRepGProp::LinearProperties(anEdges(i), aProps);
++    const gp_Pnt aMid = aProps.CentreOfMass();
++    if (std::abs(aMid.X() - 5.0) < 1.e-6 && std::abs(aMid.Z()) < 1.e-6 && aMid.Y() > 5.0)
++    {
++      aSpine = TopoDS::Edge(anEdges(i));
++    }
++  }
++  ASSERT_FALSE(aSpine.IsNull());
++
++  const double             aRadius = 0.5;
++  BRepFilletAPI_MakeFillet aFillet(aShape);
++  aFillet.Add(aRadius, aSpine);
++  aFillet.Build();
++  ASSERT_TRUE(aFillet.IsDone());
++  const TopoDS_Shape& aResult = aFillet.Shape();
++  EXPECT_TRUE(BRepCheck_Analyzer(aResult).IsValid());
++
++  // Both ends are planar caps, so the fillet takes exactly its section times
++  // the length: (cot(pi/8) - 3 pi / 8) r^2 * 10.
++  GProp_GProps aBefore, anAfter;
++  BRepGProp::VolumeProperties(aShape, aBefore);
++  BRepGProp::VolumeProperties(aResult, anAfter);
++  const double anExpected =
++    aRadius * aRadius * (1.0 / std::tan(M_PI / 8.0) - 3.0 * M_PI / 8.0) * 10.0;
++  EXPECT_NEAR(aBefore.Mass() - anAfter.Mass(), anExpected, 1.e-4);
++
++  // The section at the pocket corner is a circle in the wall y = 5.
++  bool hasCapSection = false;
++  for (TopExp_Explorer anExp(aResult, TopAbs_EDGE); anExp.More() && !hasCapSection; anExp.Next())
++  {
++    BRepAdaptor_Curve aCurve(TopoDS::Edge(anExp.Current()));
++    hasCapSection = aCurve.GetType() == GeomAbs_Circle
++                    && std::abs(aCurve.Circle().Location().Y() - 5.0) < 1.e-6
++                    && std::abs(aCurve.Circle().Radius() - aRadius) < 1.e-6;
++  }
++  EXPECT_TRUE(hasCapSection);
++}
+diff --git a/tests/bugs/modalg_8/fillet_cap_on_cylinder_at_pocket_corner b/tests/bugs/modalg_8/fillet_cap_on_cylinder_at_pocket_corner
+new file mode 100644
+index 000000000..d1baade7b
+--- /dev/null
++++ b/tests/bugs/modalg_8/fillet_cap_on_cylinder_at_pocket_corner
+@@ -0,0 +1,19 @@
++puts "============"
++puts "Modeling Algorithms - Fillet closed by a cap on a cylinder at the corner of a pocket"
++puts "(FreeCAD issue 31894)"
++puts "============"
++puts ""
++
++# A pocket with a 45 degree chamfer along the bottom of its walls. One wall
++# ends at a vertical cylinder, and the chamfer goes on around it as a cone.
++# The fillet of the edge between the wall and the chamfer ends there: the
++# cylinder is extended to close it, and the chamfer is cut along the
++# cylinder from the vertex. A corner patch used before left gaps of 0.02 mm.
++restore [locate_data_file freecad31894_pocket.brep] b
++explode b E
++
++blend result b 0.5 b_7
++
++checkshape result
++checkmaxtol result -ref 1.e-4
++checkprops result -v 36117.6 -deps 1.e-6 -s 11103.2
+diff --git a/tests/bugs/modalg_8/fillet_torus_capped_at_pocket_walls b/tests/bugs/modalg_8/fillet_torus_capped_at_pocket_walls
+new file mode 100644
+index 000000000..e51f09bab
+--- /dev/null
++++ b/tests/bugs/modalg_8/fillet_torus_capped_at_pocket_walls
+@@ -0,0 +1,17 @@
++puts "============"
++puts "Modeling Algorithms - Fillet along the bottom of a cylinder in a pocket, capped at both walls"
++puts "(FreeCAD issue 31894)"
++puts "============"
++puts ""
++
++# The edge between the cylinder of a pocket and the conical chamfer below it
++# runs from wall to wall. Both ends of its fillet (a torus) are closed by caps
++# on the planar walls.
++restore [locate_data_file freecad31894_pocket.brep] b
++explode b E
++
++blend result b 0.5 b_18
++
++checkshape result
++checkmaxtol result -ref 1.e-4
++checkprops result -v 36109.9 -deps 1.e-6 -s 11072.1
+-- 
+2.43.0
+

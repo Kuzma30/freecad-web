@@ -1,0 +1,371 @@
+From b55c8580d4cee4ad73fe3da767fc8946f88643a0 Mon Sep 17 00:00:00 2001
+From: Kuzma30 <kuzemkoa@gmail.com>
+Date: Wed, 28 Oct 2026 14:33:26 +0200
+Subject: [PATCH 22/24] Modeling Algorithms - Corner of a convex and a concave
+ fillet at a vertex with smooth edges
+
+FreeCAD issue 20085, a cube of 20 with fillets of radius 6 and a square
+hole of 8 x 8 whose walls go along the tangent lines of the fillets of
+the cube: a lower edge of the hole (convex) and the vertical edge next to
+it (concave) filleted together, the other lower edge at their vertex not.
+The result was valid, but the corner was a plate patch with tolerance
+0.38 (r = 1) to 1.1 (r = 2), visibly wavy.
+
+On a vertex with three edges such a corner is built by
+ChFi3d_FilBuilder::PerformTwoCorner: the fillets are cut where their
+traces on their common face cross, and the corner is filled between the
+two fillets and the other support of the fillet called OnSame. Here the
+vertex also has smooth edges (between the fillets of the cube and its
+sphere), so the ends of the spines are BreakPoint and the corner went to
+PerformMoreThreeCorner.
+
+- ChFi3d_TwoCornerInFacePlane: for two fillets from both sides of their
+  common face whose traces on it cross, finds the fillet whose other
+  support is a plane in which the other fillet ends (its last point on
+  its other support lies on that plane, on an arc which does not bound
+  the planar face): the concave fillet, whose other support is the next
+  wall of the hole, where the convex fillet ends.
+- ChFi3d_Builder::PerformFilletOnVertex: such a corner of two fillets is
+  given to PerformTwoCorner also on a vertex with more edges.
+- ChFi3d_FilBuilder::PerformTwoCorner: with both ends BreakPoint, that
+  fillet plays the OnSame one. The arc on which the other fillet ends is
+  not an edge of the plane: the plane is extended up to that arc, and its
+  piece from the end of the fillet to the vertex bounds the face beyond
+  it, with the orientation of the arc in that face.
+
+The 16 pairs of a vertical edge and a lower or upper edge next to it are
+valid for r = 0.5 to 2.9 with tolerance 1e-4, with the same volume for
+all of them (r = 1: 5157.00, r = 2: 5157.07 mm3).
+
+New DRAW test bugs/modalg_8/fillet_rounded_cube_square_hole_convex_concave
+and GTest
+BRepFilletAPI_MakeFilletTest.SquareHoleInRoundedCube_ConvexAndConcaveFilletsCorner.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
+---
+ .../TKFillet/ChFi3d/ChFi3d_Builder.cxx        | 11 +++
+ .../TKFillet/ChFi3d/ChFi3d_Builder_0.cxx      | 71 +++++++++++++++++++
+ .../TKFillet/ChFi3d/ChFi3d_Builder_0.hxx      | 15 ++++
+ .../TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx  | 47 +++++++++++-
+ .../GTests/BRepFilletAPI_MakeFillet_Test.cxx  | 66 +++++++++++++++++
+ ...et_rounded_cube_square_hole_convex_concave | 23 ++++++
+ 6 files changed, 232 insertions(+), 1 deletion(-)
+ create mode 100644 tests/bugs/modalg_8/fillet_rounded_cube_square_hole_convex_concave
+
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
+index 341ece731..96708f871 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
+@@ -1205,7 +1205,18 @@ void ChFi3d_Builder::PerformFilletOnVertex(const int Index)
+         {
+           break;
+         }
++        bool isInFacePlane = false;
+         if (nba > 3)
++        {
++          // A convex and a concave fillet, one ending in the plane of the
++          // other support of the other one: the corner of PerformTwoCorner.
++          NCollection_List<occ::handle<ChFiDS_Stripe>>::Iterator anIt(myVDataMap(Index));
++          const occ::handle<ChFiDS_Stripe>                       aSt1 = anIt.Value();
++          anIt.Next();
++          isInFacePlane =
++            ChFi3d_TwoCornerInFacePlane(myDS->ChangeDS(), Vtx, aSt1, anIt.Value()) != 0;
++        }
++        if (nba > 3 && !isInFacePlane)
+         {
+           if (!PerformTwoCornerMitre(Index))
+           {
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
+index 31976c8e3..a57ae8803 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
+@@ -1243,6 +1243,77 @@ bool ChFi3d_IsInFront(TopOpeBRepDS_DataStructure&       DStr,
+ 
+ //=================================================================================================
+ 
++int ChFi3d_TwoCornerInFacePlane(TopOpeBRepDS_DataStructure&       theDStr,
++                                const TopoDS_Vertex&              theVtx,
++                                const occ::handle<ChFiDS_Stripe>& theSt1,
++                                const occ::handle<ChFiDS_Stripe>& theSt2)
++{
++  if (theSt1 == theSt2 || occ::down_cast<ChFiDS_FilSpine>(theSt1->Spine()).IsNull()
++      || occ::down_cast<ChFiDS_FilSpine>(theSt2->Spine()).IsNull())
++  {
++    return 0;
++  }
++  int         aSens1 = 0, aSens2 = 0;
++  const int   anIsd1 = ChFi3d_IndexOfSurfData(theVtx, theSt1, aSens1);
++  const int   anIsd2 = ChFi3d_IndexOfSurfData(theVtx, theSt2, aSens2);
++  double      aP1 = 0., aP2 = 0.;
++  TopoDS_Face aFaCo;
++  bool        isSameSide = false, isVisAVis = false;
++  int         anIFaCo1 = 0, anIFaCo2 = 0;
++  const bool  isInter = ChFi3d_IsInFront(theDStr,
++                                        theSt1,
++                                        theSt2,
++                                        anIsd1,
++                                        anIsd2,
++                                        aSens1,
++                                        aSens2,
++                                        aP1,
++                                        aP2,
++                                        aFaCo,
++                                        isSameSide,
++                                        anIFaCo1,
++                                        anIFaCo2,
++                                        isVisAVis,
++                                        theVtx,
++                                        true);
++  if (!isInter || !isVisAVis || isSameSide)
++  {
++    return 0;
++  }
++  const occ::handle<ChFiDS_SurfData> aSD[2]     = {theSt1->SetOfSurfData()->Value(anIsd1),
++                                                   theSt2->SetOfSurfData()->Value(anIsd2)};
++  const bool                         isFirst[2] = {aSens1 == 1, aSens2 == 1};
++  const int                          anIFaOp[2] = {3 - anIFaCo1, 3 - anIFaCo2};
++  for (int k = 0; k < 2; ++k)
++  {
++    const int aK = 1 - k;
++    if (aSD[k]->Index(anIFaOp[k]) <= 0 || aSD[aK]->Index(anIFaOp[aK]) <= 0)
++    {
++      continue;
++    }
++    const TopoDS_Face         aF = TopoDS::Face(theDStr.Shape(aSD[k]->Index(anIFaOp[k])));
++    const BRepAdaptor_Surface aS(aF, false);
++    const ChFiDS_CommonPoint& aCP = aSD[aK]->Vertex(isFirst[aK], anIFaOp[aK]);
++    if (aS.GetType() != GeomAbs_Plane || !aCP.IsOnArc()
++        || aS.Plane().Distance(aCP.Point()) > 10. * Precision::Confusion())
++    {
++      continue;
++    }
++    bool isOnFace = false;
++    for (TopExp_Explorer anExp(aF, TopAbs_EDGE); anExp.More() && !isOnFace; anExp.Next())
++    {
++      isOnFace = anExp.Current().IsSame(aCP.Arc());
++    }
++    if (!isOnFace)
++    {
++      return k + 1;
++    }
++  }
++  return 0;
++}
++
++//=================================================================================================
++
+ static double recadre(const double p,
+                       const double ref,
+                       const int    sens,
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
+index d41f2bfb1..4eb36c1ee 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
+@@ -321,6 +321,21 @@ bool ChFi3d_IsInFront(TopOpeBRepDS_DataStructure&       DStr,
+                       const bool                        Check2dDistance = false,
+                       const bool                        enlarge         = false);
+ 
++//! For two fillets of constant radius meeting at a vertex from both sides of
++//! their common face (one convex, the other concave) whose traces on that
++//! face cross, finds the fillet whose other support face is a plane in which
++//! the other fillet ends: its last point on its other support lies on that
++//! plane, on an arc which does not bound the planar face.
++//! @param[in] theDStr the data structure
++//! @param[in] theVtx the vertex
++//! @param[in] theSt1 the first stripe at the vertex
++//! @param[in] theSt2 the second stripe at the vertex
++//! @return 1 or 2, the stripe whose support is that plane, or 0
++int ChFi3d_TwoCornerInFacePlane(TopOpeBRepDS_DataStructure&       theDStr,
++                                const TopoDS_Vertex&              theVtx,
++                                const occ::handle<ChFiDS_Stripe>& theSt1,
++                                const occ::handle<ChFiDS_Stripe>& theSt2);
++
+ void ChFi3d_ProjectPCurv(const occ::handle<Adaptor3d_Curve>&   HCg,
+                          const occ::handle<Adaptor3d_Surface>& HSg,
+                          occ::handle<Geom2d_Curve>&            Pcurv,
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx
+index f501e6bda..1533e7ede 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx
+@@ -378,6 +378,20 @@ void ChFi3d_FilBuilder::PerformTwoCorner(const int Index)
+   bool         isfirst2 = (Sens2 == 1);
+   Stat1                 = st1->Spine()->Status(isfirst1);
+   Stat2                 = st2->Spine()->Status(isfirst2);
++  // At a vertex with more edges (smooth edges between faces of different
++  // surfaces), a convex and a concave fillet: the one whose other support is
++  // the plane in which the other one ends plays the OnSame fillet.
++  bool isInFacePlane = false;
++  if (Stat1 == ChFiDS_BreakPoint && Stat2 == ChFiDS_BreakPoint && !SameSide)
++  {
++    const int aSam = ChFi3d_TwoCornerInFacePlane(DStr, Vtx, st1, st2);
++    if (aSam != 0)
++    {
++      isInFacePlane = true;
++      Stat1         = aSam == 1 ? ChFiDS_OnSame : ChFiDS_OnDiff;
++      Stat2         = aSam == 1 ? ChFiDS_OnDiff : ChFiDS_OnSame;
++    }
++  }
+   bool c1biseau         = (Stat1 == ChFiDS_AllSame);
+   bool c1rotule         = (Stat1 == ChFiDS_OnSame && Stat2 == ChFiDS_OnSame);
+ 
+@@ -911,6 +925,7 @@ void ChFi3d_FilBuilder::PerformTwoCorner(const int Index)
+       // the vertex). The piece of the arc between the fillet and the vertex
+       // then becomes a boundary of the extended Fopsam, see below.
+       TopoDS_Face aFopsamTwin;
++      bool        isTwinOnOtherSurface = false;
+       if (!isArcOnFopsam)
+       {
+         TopLoc_Location                 aLocSam;
+@@ -930,6 +945,23 @@ void ChFi3d_FilBuilder::PerformTwoCorner(const int Index)
+             aFopsamTwin = TopoDS::Face(itF.Value());
+           }
+         }
++        // The arc may also lie in the plane of Fopsam (see
++        // ChFi3d_TwoCornerInFacePlane): Fopsam is extended up to the arc,
++        // which then bounds the face beyond it on the side of the fillet OnDiff.
++        if (aFopsamTwin.IsNull() && isInFacePlane && isVtxOnArc)
++        {
++          const TopoDS_Shape& aFopdif = DStr.Shape(sddif->Index(ifaopdif));
++          for (NCollection_List<TopoDS_Shape>::Iterator itF(myEFMap(Arcopdif));
++               itF.More() && aFopsamTwin.IsNull();
++               itF.Next())
++          {
++            if (!itF.Value().IsSame(aFopdif))
++            {
++              aFopsamTwin          = TopoDS::Face(itF.Value());
++              isTwinOnOtherSurface = true;
++            }
++          }
++        }
+       }
+       occ::handle<GeomFill_Boundary> Bsam, Bdif, Bfac;
+       gp_Pnt2d ppopsam = sdsam->Interference(ifaopsam).PCurveOnSurf()->Value(uintpcsam);
+@@ -1094,7 +1126,20 @@ void ChFi3d_FilBuilder::PerformTwoCorner(const int Index)
+             ChFi3d_FilCurveInDS(Ipiece, IFopsam, aPCsam, anOrPiece));
+         }
+         TopAbs_Orientation anOrTwin = anOrPiece;
+-        if (aFopsamTwin.Orientation() == Fopsam.Orientation())
++        if (isTwinOnOtherSurface)
++        {
++          // the piece goes as the arc, which keeps its side in the twin face
++          for (TopExp_Explorer exE(aFopsamTwin.Oriented(TopAbs_FORWARD), TopAbs_EDGE); exE.More();
++               exE.Next())
++          {
++            if (exE.Current().IsSame(Arcopdif))
++            {
++              anOrTwin = exE.Current().Orientation();
++              break;
++            }
++          }
++        }
++        else if (aFopsamTwin.Orientation() == Fopsam.Orientation())
+         {
+           anOrTwin = TopAbs::Reverse(anOrTwin);
+         }
+diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+index b142fadd7..fbae6ec56 100644
+--- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
++++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+@@ -1746,3 +1746,69 @@ TEST(BRepFilletAPI_MakeFilletTest, SquareHoleInRoundedCube_ConcaveEdgeEndsInTang
+     }
+   }
+ }
++
++// The same holed cube with a lower edge of the hole (convex) and the vertical
++// edge next to it (concave) filleted, not the other lower edge at their vertex.
++// The vertex has more edges (smooth edges between the fillets and the spheres of
++// the cube) and the corner was a plate patch with tolerance up to 1.1. The
++// convex fillet ends in the plane of the other wall, the support of the concave
++// one: the corner is filled between the two fillets and that wall.
++TEST(BRepFilletAPI_MakeFilletTest, SquareHoleInRoundedCube_ConvexAndConcaveFilletsCorner)
++{
++  const TopoDS_Shape aBox =
++    BRepPrimAPI_MakeBox(gp_Pnt(-10.0, -10.0, -10.0), 20.0, 20.0, 20.0).Shape();
++  BRepFilletAPI_MakeFillet aRound(aBox);
++  for (TopExp_Explorer anExp(aBox, TopAbs_EDGE); anExp.More(); anExp.Next())
++  {
++    aRound.Add(6.0, TopoDS::Edge(anExp.Current()));
++  }
++  aRound.Build();
++  ASSERT_TRUE(aRound.IsDone());
++
++  const TopoDS_Shape aTool = BRepPrimAPI_MakeBox(gp_Pnt(-4.0, -4.0, -11.0), 8.0, 8.0, 22.0).Shape();
++  BRepAlgoAPI_Cut    aCut(aRound.Shape(), aTool);
++  ASSERT_TRUE(aCut.IsDone());
++  const TopoDS_Shape& aHoled = aCut.Shape();
++
++  // The vertical edge at x = 4, y = -4 with the lower edge on the wall y = -4
++  // or on the wall x = 4: the two results are the same.
++  const gp_Pnt aVertical(4.0, -4.0, 0.0);
++  const gp_Pnt aLower[2]   = {gp_Pnt(0.0, -4.0, -10.0), gp_Pnt(4.0, 0.0, -10.0)};
++  const double aRadii[2]   = {1.0, 2.0};
++  const double aVolumes[2] = {5157.00, 5157.07};
++  for (int r = 0; r < 2; ++r)
++  {
++    for (int aCase = 0; aCase < 2; ++aCase)
++    {
++      BRepFilletAPI_MakeFillet aFillet(aHoled);
++      for (TopExp_Explorer anExp(aHoled, TopAbs_EDGE); anExp.More(); anExp.Next())
++      {
++        GProp_GProps aProps;
++        BRepGProp::LinearProperties(anExp.Current(), aProps);
++        const gp_Pnt aMid = aProps.CentreOfMass();
++        if (aProps.Mass() > 1.0
++            && (aMid.Distance(aVertical) < 1.e-6 || aMid.Distance(aLower[aCase]) < 1.e-6))
++        {
++          aFillet.Add(aRadii[r], TopoDS::Edge(anExp.Current()));
++        }
++      }
++      ASSERT_EQ(aFillet.NbContours(), 2);
++      aFillet.Build();
++      ASSERT_TRUE(aFillet.IsDone()) << "r = " << aRadii[r] << ", case " << aCase;
++      const TopoDS_Shape& aResult = aFillet.Shape();
++      EXPECT_TRUE(BRepCheck_Analyzer(aResult).IsValid())
++        << "r = " << aRadii[r] << ", case " << aCase;
++
++      double aMaxTol = 0.0;
++      for (TopExp_Explorer anExp(aResult, TopAbs_VERTEX); anExp.More(); anExp.Next())
++      {
++        aMaxTol = std::max(aMaxTol, BRep_Tool::Tolerance(TopoDS::Vertex(anExp.Current())));
++      }
++      EXPECT_LT(aMaxTol, 1.e-3) << "r = " << aRadii[r] << ", case " << aCase;
++
++      GProp_GProps aProps;
++      BRepGProp::VolumeProperties(aResult, aProps);
++      EXPECT_NEAR(aProps.Mass(), aVolumes[r], 0.01) << "r = " << aRadii[r] << ", case " << aCase;
++    }
++  }
++}
+diff --git a/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_convex_concave b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_convex_concave
+new file mode 100644
+index 000000000..d9689d81c
+--- /dev/null
++++ b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_convex_concave
+@@ -0,0 +1,23 @@
++puts "============"
++puts "Modeling Algorithms - Corner of a convex and a concave fillet at a square hole in a rounded cube"
++puts "(FreeCAD issue 20085: cube 20 with fillets of radius 6, square hole 8 x 8)"
++puts "============"
++puts ""
++
++# A lower edge of the hole (convex) and the vertical edge next to it (concave)
++# are filleted, not the other lower edge at their vertex. The vertex has more
++# edges (smooth edges between the fillets and the spheres of the cube), and the
++# corner was a plate patch with tolerance 0.38 (r = 1) to 1.1 (r = 2). The convex
++# fillet ends in the plane of the other wall of the hole, the support of the
++# concave one: the corner is filled between the two fillets and that wall,
++# which is extended up to the end of the convex fillet, as when the vertex has
++# three edges.
++restore [locate_data_file freecad20085_rounded_cube_pocket.brep] b
++explode b E
++
++foreach {r vol} {1 5157.00 2 5157.07} {
++  blend result b $r b_42 $r b_33
++  checkshape result
++  checkmaxtol result -ref 1.e-4
++  checkprops result -v $vol
++}
+-- 
+2.43.0
+

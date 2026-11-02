@@ -1,0 +1,235 @@
+From fb80c9160abc50cd1716d47c364bcbd3b24907da Mon Sep 17 00:00:00 2001
+From: Kuzma30 <kuzemkoa@gmail.com>
+Date: Tue, 27 Oct 2026 15:14:15 +0200
+Subject: [PATCH 18/24] Modeling Algorithms - Close a fillet ending in the
+ plane of the next face
+
+FreeCAD issue 20085, continued: in the cube with fillets of radius 6 and
+a square hole of 8 x 8, filleting only some edges of the hole makes the
+fillets end at corners of the hole whose next edge is not filleted. The
+section at such an end lies in the plane of the next wall of the hole,
+and that plane also holds the edge between the fillet of the cube and
+the sphere of its corner. The wall must be extended up to the end of the
+fillet and bounded by that edge.
+
+ChFi3d_Builder::PerformIntersectionAtEnd did so only when the faces at
+the vertex were found from the side of the sphere (the case pro15368 of
+a vertex with five edges, two of them tangent: one face cut, the other
+reached along the arc). Found from the side of the wall, the fillet was
+cut by the wall, the fillet of the cube and the sphere: a patch with a
+tolerance of 0.009 to 9 and an invalid sphere. The same case is now
+recognized from that side.
+
+Also, the curve along the arc took its ends in the period of its circle
+where the vertex was found, not in the range of the edge: on a seam
+ending at the period, the curve went around the circle and the pcurve
+on the sphere left its domain. The ends are now taken in the range of
+the edge, and the shift of periodic curves done after it is skipped for
+such a curve.
+
+With the 8 edges of the hole and the subsets tried (each edge alone, two or
+three neighbouring edges, opposite edges, upper and lower), the result is
+valid with tolerance 1e-4 for r = 0.5 to 2.9 (5.6e-4 at 2.9); the removed
+volumes add up (r = 2: 14.18 mm3 per fillet, 1.99 mm3 per corner).
+
+New DRAW test bugs/modalg_8/fillet_rounded_cube_square_hole_ends and GTest
+BRepFilletAPI_MakeFilletTest.SquareHoleInRoundedCube_FilletEndsInWallPlane.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
+---
+ .../TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx     | 31 +++++++-
+ .../GTests/BRepFilletAPI_MakeFillet_Test.cxx  | 78 +++++++++++++++++++
+ .../fillet_rounded_cube_square_hole_ends      | 38 +++++++++
+ 3 files changed, 146 insertions(+), 1 deletion(-)
+ create mode 100644 tests/bugs/modalg_8/fillet_rounded_cube_square_hole_ends
+
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
+index 1d2205734..674a10541 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
+@@ -5207,6 +5207,18 @@ void ChFi3d_Builder::PerformIntersectionAtEnd(const int Index)
+           Face[0]          = Face[2];
+           oneintersection1 = true;
+         }
++        else if (nbface == 3 && isTangent2
++                 && (isTangent1 || ChFi3d::IsTangentFaces(Edge[3], Face[2], F2)))
++        {
++          // The same configuration seen from the other side of the fillet
++          // (the faces are found from the arc of CV1): the fillet is cut by
++          // the first face only, the last one is reached along the arc of CV2.
++          facesau          = Face[2];
++          edgesau          = Edge[3];
++          nbface           = 1;
++          Edge[1]          = Edge[3];
++          oneintersection2 = true;
++        }
+       }
+     }
+   }
+@@ -6045,6 +6057,22 @@ void ChFi3d_Builder::PerformIntersectionAtEnd(const int Index)
+           par2 = paredge2;
+           ind  = indpoint2;
+         }
++        if ((oneintersection1 || oneintersection2) && cad.IsPeriodic())
++        {
++          // The curve goes along edgesau: its ends are taken in the range of
++          // the edge, not in another period (a seam of a sphere and a
++          // cylinder ending at the vertex at the period of its circle).
++          double       anEF = 0., anEL = 0.;
++          const double aT = cad.Period();
++          BRep_Tool::Range(edgesau, anEF, anEL);
++          const auto anInRange = [&](const double theP) -> double {
++            const double aP = ElCLib::InPeriod(theP, anEF, anEF + aT);
++            return (aP - anEL > anEF - (aP - aT)) ? aP - aT : aP;
++          };
++          par1   = anInRange(par1);
++          par2   = anInRange(par2);
++          ParVtx = par1;
++        }
+         if (par1 > par2)
+         {
+           indp1 = ind;
+@@ -6098,7 +6126,8 @@ void ChFi3d_Builder::PerformIntersectionAtEnd(const int Index)
+           DStr.SetNewSurface(Face[nb - 1], Sfacemoins1);
+         }
+         //// for periodic 3d curves ////
+-        if (cad.IsPeriodic() && !C2dint1.IsNull())
++        // (a curve along edgesau has already its ends in the range of the edge)
++        if (cad.IsPeriodic() && !C2dint1.IsNull() && !(oneintersection1 || oneintersection2))
+         {
+           gp_Pnt2d                      P2d = BRep_Tool::Parameters(Vtx, Face[0]);
+           Geom2dAPI_ProjectPointOnCurve Projector(P2d, C2dint1);
+diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+index 0e9cf901b..fd59dfcf1 100644
+--- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
++++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+@@ -1395,3 +1395,81 @@ TEST(BRepFilletAPI_MakeFilletTest, SquareHoleInRoundedCube_RollsBallAroundHoleEd
+   BRepGProp::VolumeProperties(aResult, anAfter);
+   EXPECT_NEAR(aBefore.Mass() - anAfter.Mass(), 129.34, 0.05);
+ }
++
++// The same holed cube with three of the four upper edges of the hole filleted.
++// Two fillets end at corners of the hole whose next edge is not filleted. Each
++// end lies in the plane of the next wall of the hole, which also holds the edge
++// between the fillet of the cube and the sphere of its corner: the wall is
++// extended up to the end of the fillet and bounded by that edge. Depending on
++// the side from which the faces at the corner were met, the fillet was cut by
++// three faces (a wavy patch) and the sphere lost its boundary.
++TEST(BRepFilletAPI_MakeFilletTest, SquareHoleInRoundedCube_FilletEndsInWallPlane)
++{
++  const TopoDS_Shape aBox =
++    BRepPrimAPI_MakeBox(gp_Pnt(-10.0, -10.0, -10.0), 20.0, 20.0, 20.0).Shape();
++  BRepFilletAPI_MakeFillet aRound(aBox);
++  for (TopExp_Explorer anExp(aBox, TopAbs_EDGE); anExp.More(); anExp.Next())
++  {
++    aRound.Add(6.0, TopoDS::Edge(anExp.Current()));
++  }
++  aRound.Build();
++  ASSERT_TRUE(aRound.IsDone());
++
++  const TopoDS_Shape aTool = BRepPrimAPI_MakeBox(gp_Pnt(-4.0, -4.0, -11.0), 8.0, 8.0, 22.0).Shape();
++  BRepAlgoAPI_Cut    aCut(aRound.Shape(), aTool);
++  ASSERT_TRUE(aCut.IsDone());
++  const TopoDS_Shape& aHoled = aCut.Shape();
++
++  // The upper edges on the walls x = -4, y = 4 and x = 4.
++  BRepFilletAPI_MakeFillet                                      aFillet(aHoled);
++  NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> anEdges;
++  TopExp::MapShapes(aHoled, TopAbs_EDGE, anEdges);
++  for (int i = 1; i <= anEdges.Extent(); ++i)
++  {
++    const TopoDS_Edge& anEdge = TopoDS::Edge(anEdges(i));
++    GProp_GProps       aProps;
++    BRepGProp::LinearProperties(anEdge, aProps);
++    const gp_Pnt aMid = aProps.CentreOfMass();
++    if (std::abs(aMid.Z() - 10.0) < 1.e-6
++        && std::abs(std::abs(aMid.X()) + std::abs(aMid.Y()) - 4.0) < 1.e-6 && aMid.Y() > -1.0)
++    {
++      aFillet.Add(2.0, anEdge);
++    }
++  }
++  ASSERT_EQ(aFillet.NbContours(), 3);
++
++  aFillet.Build();
++  ASSERT_TRUE(aFillet.IsDone());
++  const TopoDS_Shape& aResult = aFillet.Shape();
++  EXPECT_TRUE(BRepCheck_Analyzer(aResult).IsValid());
++
++  double aMaxTol = 0.0;
++  for (TopExp_Explorer anExp(aResult, TopAbs_VERTEX); anExp.More(); anExp.Next())
++  {
++    aMaxTol = std::max(aMaxTol, BRep_Tool::Tolerance(TopoDS::Vertex(anExp.Current())));
++  }
++  EXPECT_LT(aMaxTol, 1.e-3);
++
++  // No patch at the ends: the faces of the fillets are cylinders and tori.
++  int aNbTori = 0, aNbFree = 0;
++  for (TopExp_Explorer anExp(aResult, TopAbs_FACE); anExp.More(); anExp.Next())
++  {
++    const BRepAdaptor_Surface aSurf(TopoDS::Face(anExp.Current()));
++    if (aSurf.GetType() == GeomAbs_Torus)
++    {
++      ++aNbTori;
++    }
++    else if (aSurf.GetType() == GeomAbs_BSplineSurface || aSurf.GetType() == GeomAbs_BezierSurface)
++    {
++      ++aNbFree;
++    }
++  }
++  EXPECT_EQ(aNbTori, 2);
++  EXPECT_EQ(aNbFree, 0);
++
++  // Three fillets of 14.18 mm3 and two corners of 1.99 mm3.
++  GProp_GProps aBefore, anAfter;
++  BRepGProp::VolumeProperties(aHoled, aBefore);
++  BRepGProp::VolumeProperties(aResult, anAfter);
++  EXPECT_NEAR(aBefore.Mass() - anAfter.Mass(), 46.51, 0.05);
++}
+diff --git a/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_ends b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_ends
+new file mode 100644
+index 000000000..3dc500712
+--- /dev/null
++++ b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_ends
+@@ -0,0 +1,38 @@
++puts "============"
++puts "Modeling Algorithms - Fillets ending at the corners of a square hole in a rounded cube"
++puts "(FreeCAD issue 20085: cube 20 with fillets of radius 6, square hole 8 x 8)"
++puts "============"
++puts ""
++
++# Three upper edges of the hole and one lower edge are filleted. The fillets
++# end at corners of the hole whose next edge is not filleted: each end lies in
++# the plane of the next wall of the hole, which holds the edge between the
++# fillet of the cube and the sphere of its corner. The wall is extended up to
++# the end of the fillet and bounded by that edge; no patch is built.
++restore [locate_data_file freecad20085_rounded_cube_pocket.brep] b
++explode b E
++
++blend result b 2 b_13 2 b_43 2 b_58 2 b_33
++
++checkshape result
++checkmaxtol result -ref 1.e-4
++checkprops result -v 5094.43 -s 2212.9
++
++set nbtor 0
++set nbfree 0
++foreach f [explode result F] {
++  mksurface s $f
++  set d [dump s]
++  if {[regexp {ToroidalSurface} $d]} {
++    incr nbtor
++  }
++  if {[regexp {BSplineSurface|BezierSurface} $d]} {
++    incr nbfree
++  }
++}
++if {$nbtor != 2} {
++  puts "Error: $nbtor toroidal faces instead of 2"
++}
++if {$nbfree != 0} {
++  puts "Error: $nbfree patches at the ends of the fillets"
++}
+-- 
+2.43.0
+

@@ -1,0 +1,556 @@
+From 89f16ad41a08da2718214f281c027edbed88f705 Mon Sep 17 00:00:00 2001
+From: Kuzma30 <kuzemkoa@gmail.com>
+Date: Tue, 27 Oct 2026 15:49:53 +0200
+Subject: [PATCH 19/24] Modeling Algorithms - Reuse a tangent edge as the trace
+ of a fillet
+
+A box of 20 with fillets of radius 3 on all edges has a flat top of
+14 x 14. With a square hole of 13 x 13 in the top and a fillet of radius
+0.5 on the edges of the hole (also a hole of 12 with r = 1, a hole of
+10 with r = 2), the new fillets touch the top exactly along its tangent
+edges with the fillets of the box. The result had a negative volume.
+
+- ChFi3d_Builder::SplitKPart: the trace on the top runs along the edge
+  of the face, so the hatching gives a segment along that edge whose
+  ends are the ends of the edge. At the end of the spine, the side of
+  the fillet ending on an arc was extended to such an end, as if the
+  trace left the face there. A segment along an edge is not used for
+  that any more.
+- ChFi3d_Builder::ComputeOnce: when the trace of a fillet on a face is
+  a whole edge of the face (the traces of the fillets of the hole meet
+  at the vertices of the top), the curve of the trace is that edge
+  (TopOpeBRepDS_Curve::SetExistingEdge), and the points at its ends are
+  the vertices of the edge.
+- TopOpeBRepBuild_Builder: a face whose curves are all its own edges,
+  kept on their outer side, is covered by the fillets and is consumed.
+  The copy of a face with the coincident edges substituted kept the
+  orientation of a reversed face for its wires, which reversed them.
+- TopOpeBRepBuild_Builder::BuildFaces: the face of a fillet takes an
+  existing edge running opposite to its curve in the reversed
+  orientation.
+- TopOpeBRepDS_BuildTool::PCurve: the pcurve of an existing edge is
+  brought to the range of the edge also when it is not reversed.
+
+The top is consumed, the traces of the fillets are the tangent edges of
+the top. The three cases are valid with tolerance 1.4e-7 to 2.8e-7, and
+the removed volume goes on continuously from the radius just below
+(r = 0.999 and 1 with the hole of 12: 10.6627 and 10.6844 mm3).
+
+New DRAW test bugs/modalg_8/fillet_trace_on_tangent_edge and GTest
+BRepFilletAPI_MakeFilletTest.FilletTraceOnTangentEdge_CoversFaceExactly.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
+---
+ .../TopOpeBRepBuild_BuildFaces.cxx            |   5 +
+ .../TopOpeBRepBuild_Builder.cxx               |  41 ++++-
+ .../TopOpeBRepDS/TopOpeBRepDS_BuildTool.cxx   |  13 +-
+ .../TKFillet/ChFi3d/ChFi3d_Builder.cxx        | 167 ++++++++++++++++++
+ .../TKFillet/ChFi3d/ChFi3d_Builder_SpKP.cxx   |  23 ++-
+ .../GTests/BRepFilletAPI_MakeFillet_Test.cxx  |  67 +++++++
+ .../modalg_8/fillet_trace_on_tangent_edge     |  35 ++++
+ 7 files changed, 343 insertions(+), 8 deletions(-)
+ create mode 100644 tests/bugs/modalg_8/fillet_trace_on_tangent_edge
+
+diff --git a/src/ModelingAlgorithms/TKBool/TopOpeBRepBuild/TopOpeBRepBuild_BuildFaces.cxx b/src/ModelingAlgorithms/TKBool/TopOpeBRepBuild/TopOpeBRepBuild_BuildFaces.cxx
+index 2db986bfa..ec440a220 100644
+--- a/src/ModelingAlgorithms/TKBool/TopOpeBRepBuild/TopOpeBRepBuild_BuildFaces.cxx
++++ b/src/ModelingAlgorithms/TKBool/TopOpeBRepBuild/TopOpeBRepBuild_BuildFaces.cxx
+@@ -112,6 +112,11 @@ void TopOpeBRepBuild_Builder::BuildFaces(const int
+       {
+         ori = TopAbs::Reverse(ori);
+       }
++      // The existing edge reused for the curve runs the other way.
++      if (CDS.IsExistingEdgeReversed())
++      {
++        ori = TopAbs::Reverse(ori);
++      }
+       myBuildTool.Orientation(anEdge, ori);
+       const occ::handle<Geom2d_Curve>& PC = SCurves.PCurve();
+       myBuildTool.PCurve(aFace, anEdge, CDS, PC);
+diff --git a/src/ModelingAlgorithms/TKBool/TopOpeBRepBuild/TopOpeBRepBuild_Builder.cxx b/src/ModelingAlgorithms/TKBool/TopOpeBRepBuild/TopOpeBRepBuild_Builder.cxx
+index 01fe86885..ebfeaee52 100644
+--- a/src/ModelingAlgorithms/TKBool/TopOpeBRepBuild/TopOpeBRepBuild_Builder.cxx
++++ b/src/ModelingAlgorithms/TKBool/TopOpeBRepBuild/TopOpeBRepBuild_Builder.cxx
+@@ -83,8 +83,11 @@ static TopoDS_Shape SubstituteCoincidentEdges(
+     return theShape;
+   }
+ 
+-  TopoDS_Shape aCopy      = theShape.EmptyCopied();
+-  bool         isModified = false;
++  // The sub-shapes are taken relative to the shape itself (not composed with
++  // its orientation): they are added to a forward copy, oriented at the end.
++  TopoDS_Shape aCopy = theShape.EmptyCopied();
++  aCopy.Orientation(TopAbs_FORWARD);
++  bool isModified = false;
+   for (TopoDS_Iterator anIt(theShape, false, false); anIt.More(); anIt.Next())
+   {
+     TopoDS_Shape aSubShape = anIt.Value();
+@@ -111,6 +114,7 @@ static TopoDS_Shape SubstituteCoincidentEdges(
+       theBuildTool.AddWireEdge(aCopy, aSubShape);
+     }
+   }
++  aCopy.Orientation(theShape.Orientation());
+   return isModified ? aCopy : theShape;
+ }
+ 
+@@ -204,6 +208,39 @@ static bool IsConsumedByCoincidentCurves(
+   const TopoDS_Shape&                             theFace,
+   const occ::handle<TopOpeBRepDS_HDataStructure>& theDataStructure)
+ {
++  // All the curves on the face are edges of the face, the face being kept on
++  // their outer side: the fillets cover the whole face.
++  int  aNbBoundaryCurves = 0;
++  bool isAllOutward      = true;
++  for (TopOpeBRepDS_CurveIterator aCurveIt(theDataStructure->FaceCurves(theFace));
++       aCurveIt.More() && isAllOutward;
++       aCurveIt.Next())
++  {
++    const TopOpeBRepDS_Curve& aCurve            = theDataStructure->Curve(aCurveIt.Current());
++    const TopoDS_Edge&        anEdge            = aCurve.ExistingEdge();
++    TopAbs_Orientation        anEdgeOrientation = TopAbs_EXTERNAL;
++    for (TopExp_Explorer anEdgeIt(theFace, TopAbs_EDGE); !anEdge.IsNull() && anEdgeIt.More();
++         anEdgeIt.Next())
++    {
++      if (anEdgeIt.Current().IsSame(anEdge))
++      {
++        anEdgeOrientation = anEdgeIt.Current().Orientation();
++        break;
++      }
++    }
++    TopAbs_Orientation aCurveOrientation = aCurveIt.Orientation(TopAbs_IN);
++    if (aCurve.IsExistingEdgeReversed())
++    {
++      aCurveOrientation = TopAbs::Reverse(aCurveOrientation);
++    }
++    isAllOutward = (anEdgeOrientation == TopAbs_FORWARD || anEdgeOrientation == TopAbs_REVERSED)
++                   && aCurveOrientation == TopAbs::Reverse(anEdgeOrientation);
++    ++aNbBoundaryCurves;
++  }
++  if (aNbBoundaryCurves > 0 && isAllOutward)
++  {
++    return true;
++  }
+   for (int aStateIndex = 0; aStateIndex < 2; ++aStateIndex)
+   {
+     const TopAbs_State                aState = aStateIndex == 0 ? TopAbs_IN : TopAbs_OUT;
+diff --git a/src/ModelingAlgorithms/TKBool/TopOpeBRepDS/TopOpeBRepDS_BuildTool.cxx b/src/ModelingAlgorithms/TKBool/TopOpeBRepDS/TopOpeBRepDS_BuildTool.cxx
+index 54a8e0e54..397ed3bf4 100644
+--- a/src/ModelingAlgorithms/TKBool/TopOpeBRepDS/TopOpeBRepDS_BuildTool.cxx
++++ b/src/ModelingAlgorithms/TKBool/TopOpeBRepDS/TopOpeBRepDS_BuildTool.cxx
+@@ -1268,11 +1268,20 @@ void TopOpeBRepDS_BuildTool::PCurve(TopoDS_Shape&                    F,
+ 
+     if (!C.IsNull())
+     {
+-      if (rangedef && (CDS.IsExistingEdgeReversed() || CDS.IsEquivalentCurveReversed()))
++      // An existing edge keeps its own parameters: the pcurve computed on the
++      // range of the curve is brought to the range of the edge.
++      const bool isOtherRange = !CDS.ExistingEdge().IsNull()
++                                && (std::abs(Cf - CDSmin) > Precision::PConfusion()
++                                    || std::abs(Cl - CDSmax) > Precision::PConfusion());
++      if (rangedef
++          && (CDS.IsExistingEdgeReversed() || CDS.IsEquivalentCurveReversed() || isOtherRange))
+       {
+         occ::handle<Geom2d_TrimmedCurve> aReversedPCurve =
+           new Geom2d_TrimmedCurve(PCT, CDSmin, CDSmax);
+-        aReversedPCurve->Reverse();
++        if (CDS.IsExistingEdgeReversed() || CDS.IsEquivalentCurveReversed())
++        {
++          aReversedPCurve->Reverse();
++        }
+         GeomLib::SameRange(Precision::PConfusion(),
+                            aReversedPCurve,
+                            aReversedPCurve->FirstParameter(),
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
+index 7b1f3ebfc..0dc2bd035 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
+@@ -39,6 +39,7 @@
+ #include <Standard_NotImplemented.hxx>
+ #include <Standard_Integer.hxx>
+ #include <NCollection_Map.hxx>
++#include <NCollection_DataMap.hxx>
+ #include <TopAbs_ShapeEnum.hxx>
+ #include <BRepCheck_Analyzer.hxx>
+ #include <ChFiDS_FilSpine.hxx>
+@@ -60,6 +61,7 @@
+ #include <TopOpeBRepDS_HDataStructure.hxx>
+ #include <TopOpeBRepDS_Interference.hxx>
+ #include <TopOpeBRepDS_PointIterator.hxx>
++#include <GeomAPI_ProjectPointOnCurve.hxx>
+ 
+ //=================================================================================================
+ 
+@@ -379,6 +381,168 @@ void ChFi3d_Builder::Compute()
+ 
+ //=================================================================================================
+ 
++// The trace of a fillet on a face runs along a whole edge of the face (the
++// fillet ends exactly on the tangent edge of the face with the next face, and
++// its corners end on the vertices of that edge): the trace is that edge, and
++// its ends are the vertices of the edge. The points replaced by vertices are
++// added to thePointVertices.
++static void ShareCoincidentTraces(TopOpeBRepDS_DataStructure&             theDS,
++                                  const occ::handle<ChFiDS_Stripe>&       theStripe,
++                                  const ChFiDS_Map&                       theEFMap,
++                                  NCollection_DataMap<int, TopoDS_Shape>& thePointVertices)
++{
++  const NCollection_Sequence<occ::handle<ChFiDS_SurfData>>& aSeq =
++    theStripe->SetOfSurfData()->Sequence();
++  for (int j = 1; j <= aSeq.Length(); ++j)
++  {
++    const occ::handle<ChFiDS_SurfData>& aSD = aSeq(j);
++    for (int aSide = 1; aSide <= 2; ++aSide)
++    {
++      const ChFiDS_FaceInterference& aFi  = aSD->Interference(aSide);
++      const int                      anIc = aFi.LineIndex();
++      const int                      anIs = aSD->Index(aSide);
++      if (anIc == 0 || anIs <= 0)
++      {
++        continue;
++      }
++      const TopOpeBRepDS_Curve&      aDSC = theDS.Curve(anIc);
++      const occ::handle<Geom_Curve>& aC   = aDSC.Curve();
++      if (aC.IsNull() || !aDSC.ExistingEdge().IsNull())
++      {
++        continue;
++      }
++      // The points at the ends of the trace: its first and last points.
++      int    anIp[2]  = {0, 0};
++      double aPar[2]  = {RealLast(), RealFirst()};
++      bool   isPnt[2] = {false, false};
++      for (NCollection_List<occ::handle<TopOpeBRepDS_Interference>>::Iterator anIt(
++             theDS.CurveInterferences(anIc));
++           anIt.More();
++           anIt.Next())
++      {
++        const occ::handle<TopOpeBRepDS_CurvePointInterference> aCPI =
++          occ::down_cast<TopOpeBRepDS_CurvePointInterference>(anIt.Value());
++        if (aCPI.IsNull())
++        {
++          continue;
++        }
++        for (int k = 0; k < 2; ++k)
++        {
++          if ((k == 0 && aCPI->Parameter() < aPar[0]) || (k == 1 && aCPI->Parameter() > aPar[1]))
++          {
++            anIp[k]  = aCPI->Geometry();
++            aPar[k]  = aCPI->Parameter();
++            isPnt[k] = aCPI->GeometryType() == TopOpeBRepDS_POINT;
++          }
++        }
++      }
++      if (anIp[0] == 0 || anIp[1] == 0 || aPar[1] - aPar[0] < Precision::PConfusion())
++      {
++        continue;
++      }
++      const TopoDS_Face aF = TopoDS::Face(theDS.Shape(anIs));
++      for (TopExp_Explorer anExp(aF, TopAbs_EDGE); anExp.More(); anExp.Next())
++      {
++        const TopoDS_Edge& anE = TopoDS::Edge(anExp.Current());
++        if (BRep_Tool::Degenerated(anE) || !theEFMap.Contains(anE))
++        {
++          continue;
++        }
++        double                         aEF = 0., aEL = 0.;
++        const occ::handle<Geom_Curve>& aCE = BRep_Tool::Curve(anE, aEF, aEL);
++        if (aCE.IsNull())
++        {
++          continue;
++        }
++        const double aTol = std::max(BRep_Tool::Tolerance(anE), Precision::Confusion());
++        // The ends of the trace on the vertices of the edge, its points on the edge.
++        TopoDS_Vertex aV[2];
++        TopExp::Vertices(anE, aV[0], aV[1]);
++        TopoDS_Vertex anEnd[2];
++        for (int k = 0; k < 2; ++k)
++        {
++          const gp_Pnt aP = aC->Value(aPar[k]);
++          for (int m = 0; m < 2; ++m)
++          {
++            if (!aV[m].IsNull() && aP.Distance(BRep_Tool::Pnt(aV[m])) < aTol)
++            {
++              anEnd[k] = aV[m];
++            }
++          }
++        }
++        if (anEnd[0].IsNull() || anEnd[1].IsNull() || anEnd[0].IsSame(anEnd[1]))
++        {
++          continue;
++        }
++        bool isOn = true;
++        for (int i = 1; i < 8 && isOn; ++i)
++        {
++          GeomAPI_ProjectPointOnCurve aProj(aC->Value(aPar[0] + (aPar[1] - aPar[0]) * i / 8.),
++                                            aCE,
++                                            aEF,
++                                            aEL);
++          isOn = aProj.NbPoints() > 0 && aProj.LowerDistance() < aTol;
++        }
++        if (!isOn)
++        {
++          continue;
++        }
++        const bool isReversed =
++          BRep_Tool::Parameter(anEnd[0], anE) > BRep_Tool::Parameter(anEnd[1], anE);
++        theDS.ChangeCurve(anIc).SetExistingEdge(anE, isReversed);
++        for (int k = 0; k < 2; ++k)
++        {
++          if (isPnt[k] && !thePointVertices.IsBound(anIp[k]))
++          {
++            thePointVertices.Bind(anIp[k], anEnd[k]);
++          }
++        }
++        break;
++      }
++    }
++  }
++}
++
++//=================================================================================================
++
++// The interferences on the points replaced by vertices of the shape refer to
++// the vertices.
++static void ReplacePointsByVertices(TopOpeBRepDS_DataStructure&                   theDS,
++                                    const NCollection_DataMap<int, TopoDS_Shape>& thePointVertices)
++{
++  if (thePointVertices.IsEmpty())
++  {
++    return;
++  }
++  const auto aReplace = [&](NCollection_List<occ::handle<TopOpeBRepDS_Interference>>& theList) {
++    for (NCollection_List<occ::handle<TopOpeBRepDS_Interference>>::Iterator anIt(theList);
++         anIt.More();
++         anIt.Next())
++    {
++      const occ::handle<TopOpeBRepDS_Interference>& anI = anIt.Value();
++      if (anI->GeometryType() == TopOpeBRepDS_POINT && thePointVertices.IsBound(anI->Geometry()))
++      {
++        anI->GeometryType(TopOpeBRepDS_VERTEX);
++        anI->Geometry(theDS.AddShape(thePointVertices(anI->Geometry())));
++      }
++    }
++  };
++  for (int i = 1; i <= theDS.NbCurves(); ++i)
++  {
++    aReplace(theDS.ChangeCurveInterferences(i));
++  }
++  for (int i = 1; i <= theDS.NbShapes(); ++i)
++  {
++    aReplace(theDS.ChangeShapeInterferences(i));
++  }
++  for (int i = 1; i <= theDS.NbSurfaces(); ++i)
++  {
++    aReplace(theDS.ChangeSurfaceInterferences(i));
++  }
++}
++
++//=================================================================================================
++
+ void ChFi3d_Builder::ComputeOnce()
+ {
+   // The stripes added by a previous computation are removed.
+@@ -499,6 +663,7 @@ void ChFi3d_Builder::ComputeOnce()
+     int                 indcursh = DStr.AddShape(cursh);
+     MapIndSo.Add(indcursh);
+   }
++  NCollection_DataMap<int, TopoDS_Shape> aPointVertices;
+   if (done)
+   {
+     int i1;
+@@ -537,12 +702,14 @@ void ChFi3d_Builder::ComputeOnce()
+       // 05/02/02 akm ^^^
+       int solidindex = st->SolidIndex();
+       ChFi3d_FilDS(solidindex, st, DStr, myRegul, tolapp3d, tol2d);
++      ShareCoincidentTraces(DStr, st, myEFMap, aPointVertices);
+       if (!done)
+       {
+         break;
+       }
+     }
+ 
++    ReplacePointsByVertices(DStr, aPointVertices);
+     if (done)
+     {
+       BRep_Builder B1;
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_SpKP.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_SpKP.cxx
+index 5c18f1026..62cb3f800 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_SpKP.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_SpKP.cxx
+@@ -803,6 +803,17 @@ static ChFi3d_CoincidentDomainEdge CoincidentDomainEdge(
+ 
+ //=================================================================================================
+ 
++// True if the domain is a segment of the hatching along an edge of the face:
++// its ends are the ends of that segment, not crossings of the boundary.
++static bool IsCoincidentDomain(
++  const NCollection_DataMap<int, occ::handle<Adaptor2d_Curve2d>>& theElements,
++  const HatchGen_Domain&                                          theDomain)
++{
++  return !CoincidentDomainEdge(theElements, theDomain).Edge.IsNull();
++}
++
++//=================================================================================================
++
+ static void SetCoincidentDomainEdge(
+   TopOpeBRepDS_DataStructure&                                     theDS,
+   const ChFiDS_FaceInterference&                                  theInterference,
+@@ -1296,7 +1307,8 @@ bool ChFi3d_Builder::SplitKPart(const occ::handle<ChFiDS_SurfData>&
+                  2,
+                  pitol,
+                  bout1);
+-          if (!CP2.IsOnArc() || (CP2.IsOnArc() && SearchFace(Spine, CP2, F2, FBID)))
++          const bool isCoincident = IsCoincidentDomain(M2, H2.Domain(iH2, Ind2(ion2.First())));
++          if (!CP2.IsOnArc() || (CP2.IsOnArc() && SearchFace(Spine, CP2, F2, FBID)) || isCoincident)
+           {
+             CP2 = sov;
+             if (Spine->FirstStatus() != ChFiDS_OnSame)
+@@ -1325,7 +1337,8 @@ bool ChFi3d_Builder::SplitKPart(const occ::handle<ChFiDS_SurfData>&
+                  1,
+                  pitol,
+                  bout1);
+-          if (!CP1.IsOnArc() || (CP1.IsOnArc() && SearchFace(Spine, CP1, F1, FBID)))
++          const bool isCoincident = IsCoincidentDomain(M1, H1.Domain(iH1, Ind1(ion1.First())));
++          if (!CP1.IsOnArc() || (CP1.IsOnArc() && SearchFace(Spine, CP1, F1, FBID)) || isCoincident)
+           {
+             CP1 = sov;
+             if (Spine->FirstStatus() != ChFiDS_OnSame)
+@@ -1432,7 +1445,8 @@ bool ChFi3d_Builder::SplitKPart(const occ::handle<ChFiDS_SurfData>&
+                  2,
+                  pitol,
+                  bout2);
+-          if (!CP2.IsOnArc() || (CP2.IsOnArc() && SearchFace(Spine, CP2, F2, FBID)))
++          const bool isCoincident = IsCoincidentDomain(M2, H2.Domain(iH2, Ind2(ion2.Last())));
++          if (!CP2.IsOnArc() || (CP2.IsOnArc() && SearchFace(Spine, CP2, F2, FBID)) || isCoincident)
+           {
+             CP2 = sov;
+             if (Spine->LastStatus() != ChFiDS_OnSame)
+@@ -1461,7 +1475,8 @@ bool ChFi3d_Builder::SplitKPart(const occ::handle<ChFiDS_SurfData>&
+                  1,
+                  pitol,
+                  bout2);
+-          if (!CP1.IsOnArc() || (CP1.IsOnArc() && SearchFace(Spine, CP1, F1, FBID)))
++          const bool isCoincident = IsCoincidentDomain(M1, H1.Domain(iH1, Ind1(ion1.Last())));
++          if (!CP1.IsOnArc() || (CP1.IsOnArc() && SearchFace(Spine, CP1, F1, FBID)) || isCoincident)
+           {
+             CP1 = sov;
+             if (Spine->LastStatus() != ChFiDS_OnSame)
+diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+index fd59dfcf1..48fe4a1cc 100644
+--- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
++++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+@@ -1473,3 +1473,70 @@ TEST(BRepFilletAPI_MakeFilletTest, SquareHoleInRoundedCube_FilletEndsInWallPlane
+   BRepGProp::VolumeProperties(aResult, anAfter);
+   EXPECT_NEAR(aBefore.Mass() - anAfter.Mass(), 46.51, 0.05);
+ }
++
++// A box of 20 with fillets of radius 3 on all edges, so that its top is flat
++// over 14 x 14, and a square hole of 13 x 13 in the top. A fillet of radius 0.5
++// on the edges of the hole touches the top exactly along the tangent edges of
++// the top with the fillets of the box: the top is covered by the new fillets
++// up to its boundary, and the traces of the new fillets are these edges. The
++// coincident traces were built as new edges next to the old ones, and the
++// result had a negative volume (also with r = 1 and a hole of 12, r = 2 and a
++// hole of 10).
++TEST(BRepFilletAPI_MakeFilletTest, FilletTraceOnTangentEdge_CoversFaceExactly)
++{
++  const TopoDS_Shape       aBox = BRepPrimAPI_MakeBox(20.0, 20.0, 20.0).Shape();
++  BRepFilletAPI_MakeFillet aRound(aBox);
++  for (TopExp_Explorer anExp(aBox, TopAbs_EDGE); anExp.More(); anExp.Next())
++  {
++    aRound.Add(3.0, TopoDS::Edge(anExp.Current()));
++  }
++  aRound.Build();
++  ASSERT_TRUE(aRound.IsDone());
++
++  const TopoDS_Shape aTool = BRepPrimAPI_MakeBox(gp_Pnt(3.5, 3.5, 12.0), 13.0, 13.0, 10.0).Shape();
++  BRepAlgoAPI_Cut    aCut(aRound.Shape(), aTool);
++  ASSERT_TRUE(aCut.IsDone());
++  const TopoDS_Shape& aHoled = aCut.Shape();
++
++  BRepFilletAPI_MakeFillet                                      aFillet(aHoled);
++  NCollection_IndexedMap<TopoDS_Shape, TopTools_ShapeMapHasher> anEdges;
++  TopExp::MapShapes(aHoled, TopAbs_EDGE, anEdges);
++  for (int i = 1; i <= anEdges.Extent(); ++i)
++  {
++    const TopoDS_Edge& anEdge = TopoDS::Edge(anEdges(i));
++    GProp_GProps       aProps;
++    BRepGProp::LinearProperties(anEdge, aProps);
++    const gp_Pnt aMid = aProps.CentreOfMass();
++    if (std::abs(aMid.Z() - 20.0) < 1.e-6
++        && (std::abs(aMid.X() - 3.5) < 1.e-6 || std::abs(aMid.X() - 16.5) < 1.e-6
++            || std::abs(aMid.Y() - 3.5) < 1.e-6 || std::abs(aMid.Y() - 16.5) < 1.e-6))
++    {
++      aFillet.Add(0.5, anEdge);
++    }
++  }
++  ASSERT_EQ(aFillet.NbContours(), 4);
++
++  aFillet.Build();
++  ASSERT_TRUE(aFillet.IsDone());
++  const TopoDS_Shape& aResult = aFillet.Shape();
++  EXPECT_TRUE(BRepCheck_Analyzer(aResult).IsValid());
++
++  // No face is left on the plane of the top.
++  int aNbTop = 0;
++  for (TopExp_Explorer anExp(aResult, TopAbs_FACE); anExp.More(); anExp.Next())
++  {
++    const BRepAdaptor_Surface aSurf(TopoDS::Face(anExp.Current()));
++    if (aSurf.GetType() == GeomAbs_Plane && std::abs(aSurf.Plane().Location().Z() - 20.0) < 1.e-6
++        && aSurf.Plane().Axis().Direction().IsParallel(gp::DZ(), 1.e-9))
++    {
++      ++aNbTop;
++    }
++  }
++  EXPECT_EQ(aNbTop, 0);
++
++  // Four fillets of (1 - pi / 4) * 0.25 * 13 and the corners where they meet.
++  GProp_GProps aBefore, anAfter;
++  BRepGProp::VolumeProperties(aHoled, aBefore);
++  BRepGProp::VolumeProperties(aResult, anAfter);
++  EXPECT_NEAR(aBefore.Mass() - anAfter.Mass(), 2.8378, 1.e-3);
++}
+diff --git a/tests/bugs/modalg_8/fillet_trace_on_tangent_edge b/tests/bugs/modalg_8/fillet_trace_on_tangent_edge
+new file mode 100644
+index 000000000..d5af29737
+--- /dev/null
++++ b/tests/bugs/modalg_8/fillet_trace_on_tangent_edge
+@@ -0,0 +1,35 @@
++puts "============"
++puts "Modeling Algorithms - Fillet whose trace is a tangent edge of its face"
++puts "(box with rounded edges, square hole as wide as the flat top minus the fillets)"
++puts "============"
++puts ""
++
++# A box of 20 with fillets of radius 3 on all edges has a flat top of 14 x 14.
++# A square hole of 12 x 12 is cut in it, and the edges of the hole are filleted
++# with radius 1: the new fillets touch the top exactly along its tangent edges
++# with the fillets of the box. The top is covered by the new fillets, and their
++# traces are these edges.
++box b 20 20 20
++explode b E
++blend r b 3 b_1 3 b_2 3 b_3 3 b_4 3 b_5 3 b_6 3 b_7 3 b_8 3 b_9 3 b_10 3 b_11 3 b_12
++box t 4 4 12 12 12 10
++bcut h r t
++
++set edges {}
++foreach e [explode h E] {
++  regexp {X = +([-0-9.e]+)} [lprops $e] full x
++  regexp {Y = +([-0-9.e]+)} [lprops $e] full y
++  regexp {Z = +([-0-9.e]+)} [lprops $e] full z
++  if {abs($z - 20.) < 1.e-6 && (abs($x - 4.) < 1.e-6 || abs($x - 16.) < 1.e-6 || abs($y - 4.) < 1.e-6 || abs($y - 16.) < 1.e-6)} {
++    lappend edges 1 $e
++  }
++}
++if {[llength $edges] != 8} {
++  puts "Error: [expr [llength $edges] / 2] edges of the hole instead of 4"
++}
++
++eval blend result h $edges
++
++checkshape result
++checkmaxtol result -ref 1.39e-7
++checkprops result -v 6409.93 -s 2444.74
+-- 
+2.43.0
+
