@@ -47,7 +47,7 @@ permissions:
   contents: read
 
 env:
-  DEPS_KEY: v2-wasm64-emsdk6.0.9-xerces3.2.5-occt7.8.1-vtk9.3.1-coin4.0.3-boost1.86
+  DEPS_KEY: v2-wasm64-emsdk6.0.9-xerces3.2.5-occt8.1-3d097a03-fillets24-vtk9.3.1-coin4.0.3-boost1.86
   # gmsh 4.13.1 as shipped in every release to date: "4.13.1-git-3862278" is the version
   # string inside the v1.0.0 gmsh.wasm. Full sha of that short id, from gitlab.onelab.info.
   GMSH_SHA: 3862278e6705ecc0f5d32144289635a34f5d90cb
