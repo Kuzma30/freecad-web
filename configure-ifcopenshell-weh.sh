@@ -3,7 +3,7 @@
 # Copyright (c) Virtastic
 # Port IfcOpenShell 0.8.6 to wasm64-emscripten for real IFC in FreeCAD's BIM/Arch
 # (replaces the ifcopenshell stub). Builds IfcParse (schema parser) + IfcGeom
-# (geometry over OUR wasm OCCT 7.8.1 — exact version match) + the SWIG Python
+# (geometry over OUR wasm OCCT 8.1 — exact version match; patches/ifcopenshell-occt8.patch) + the SWIG Python
 # wrapper as a static module (inittab like pivy/_coin). Uses OUR emsdk 6.0.9 +
 # CPython, and -fwasm-exceptions (emscripten EH) to match the FreeCAD ABI — NOT the
 # pyodide default -fwasm-exceptions (would be an incompatible EH ABI).
@@ -71,6 +71,11 @@ echo "eigen dir: $EIGEN_DIR"
 # the Python bindings do not compile at all. Idempotent; see the tool for the full account.
 python3 "$ROOT/tools/patch-ifcopenshell.py" "$SRC"
 
+# OCCT 8: occt8_compat.hxx comes from patches/ifcopenshell-occt8.patch. Force-included below;
+# it does nothing in the targets that have no OCCT on their include path.
+[ -f "$SRC/src/ifcgeom/kernels/opencascade/occt8_compat.hxx" ] || {
+    echo "!! $SRC has no occt8_compat.hxx -- run patches/apply.sh (ifcopenshell-occt8.patch)"; exit 1; }
+
 # IfcOpenShell's cmake root is src/cmake/../cmake (the top cmake/ dir points at src via WASM logic);
 # the actual CMakeLists is deps/src/ifcopenshell/cmake/CMakeLists.txt.
 emcmake cmake -S "$SRC/cmake" -B "$BUILD" -G Ninja \
@@ -102,7 +107,7 @@ emcmake cmake -S "$SRC/cmake" -B "$BUILD" -G Ninja \
   -DCMAKE_PREFIX_PATH="$DW" \
   -DCMAKE_FIND_ROOT_PATH="$DW" \
   -DCMAKE_C_FLAGS="-fwasm-exceptions -pthread -O2" \
-  -DCMAKE_CXX_FLAGS="-fwasm-exceptions -pthread -O2 -DBOOST_ALL_NO_LIB -I$DW/include" \
+  -DCMAKE_CXX_FLAGS="-fwasm-exceptions -pthread -O2 -DBOOST_ALL_NO_LIB -I$DW/include -include $SRC/src/ifcgeom/kernels/opencascade/occt8_compat.hxx" \
   -DCMAKE_CROSSCOMPILING_EMULATOR="$FCWEB_NODE"
 
 echo "=== IfcOpenShell configure done; building ==="

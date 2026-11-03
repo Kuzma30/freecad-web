@@ -203,6 +203,12 @@ apply_one pivy          pivy.patch
 # called, and that compile is what kills the renderer on wasm64: schema_by_name()
 # peaks at 5.6 GB on wasm32 and comes back, and reaches 8 GB here and does not.
 apply_one ifcopenshell  ifcopenshell-schema-code-size.patch
+# IfcOpenShell 0.8.0 was written against OCCT 7.x. OCCT 8 dropped the Handle_<Class>
+# typedefs, moved the collection aliases (TopTools_ListOfShape, ...) into deprecated
+# headers nothing includes on the way, made BRepTopAdaptor_FClass2d non-movable and BVH's
+# arrays NCollection vectors. The patch adds occt8_compat.hxx, which
+# configure-ifcopenshell-weh.sh force-includes, and fixes the three sources.
+apply_one ifcopenshell  ifcopenshell-occt8.patch
 # Never applied until now, and it shows: opening the shipped FEMExample.FCStd traps with
 # "RuntimeError: unreachable" inside vtkXMLParser::GetXMLByteIndex, which is precisely the
 # failure this patch's own comment describes. It was written, committed, and named in the

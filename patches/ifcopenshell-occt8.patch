@@ -1,0 +1,150 @@
+diff --git a/src/ifcgeom/kernels/opencascade/IfcGeomTree.h b/src/ifcgeom/kernels/opencascade/IfcGeomTree.h
+index 997391f..840106b 100644
+--- a/src/ifcgeom/kernels/opencascade/IfcGeomTree.h
++++ b/src/ifcgeom/kernels/opencascade/IfcGeomTree.h
+@@ -1908,7 +1908,7 @@ namespace IfcGeom {
+             BVH_Triangulation<Standard_Real, 3> triangulation(builder);
+ 
+             for (int i = 0; i < elem_verts.size(); i += 3) {
+-                triangulation.Vertices.push_back(BVH_Vec3d(elem_verts[i], elem_verts[i + 1], elem_verts[i + 2]));
++                BVH::Array<Standard_Real, 3>::Append(triangulation.Vertices, BVH_Vec3d(elem_verts[i], elem_verts[i + 1], elem_verts[i + 2]));
+                 verts.push_back(gp_Pnt(elem_verts[i], elem_verts[i + 1], elem_verts[i + 2]));
+             }
+ 
+@@ -1920,7 +1920,7 @@ namespace IfcGeom {
+                 gp_Vec dir2(v1_pnt, v3_pnt);
+                 gp_Vec cross_product = dir1.Crossed(dir2);
+                 if (cross_product.Magnitude() > Precision::Confusion()) {
+-                    triangulation.Elements.push_back(BVH_Vec4i(
++                    BVH::Array<Standard_Integer, 4>::Append(triangulation.Elements, BVH_Vec4i(
+                         elem_faces[i], elem_faces[i + 1], elem_faces[i + 2], original_tris_index
+                     ));
+                     original_tris_index++;
+diff --git a/src/ifcgeom/kernels/opencascade/boolean_utils.cpp b/src/ifcgeom/kernels/opencascade/boolean_utils.cpp
+index 975ee00..7d4b16e 100644
+--- a/src/ifcgeom/kernels/opencascade/boolean_utils.cpp
++++ b/src/ifcgeom/kernels/opencascade/boolean_utils.cpp
+@@ -23,7 +23,7 @@
+ #include <BOPAlgo_Alerts.hxx>
+ #include <ShapeFix_Shape.hxx>
+ #include <BRepCheck_Analyzer.hxx>
+-#include <BRepCheck_ListIteratorOfListOfStatus.hxx>
++#include <BRepCheck_ListOfStatus.hxx>
+ #include <BRepCheck.hxx>
+ #include <ShapeAnalysis_Edge.hxx>
+ #include <Bnd_OBB.hxx>
+@@ -722,7 +722,7 @@ bool IfcGeom::util::boolean_subtraction_2d_using_builder(const TopoDS_Shape & a_
+ 	std::vector<TopoDS_Face> wire_faces;
+ 	wire_faces.reserve(wires.size());
+ 
+-	std::vector<BRepTopAdaptor_FClass2d> wire_clss;
++	std::vector<std::unique_ptr<BRepTopAdaptor_FClass2d>> wire_clss;
+ 	wire_clss.reserve(wires.size());
+ 
+ 	std::vector<std::unique_ptr<ShapeAnalysis_Surface>> sass;
+@@ -730,7 +730,7 @@ bool IfcGeom::util::boolean_subtraction_2d_using_builder(const TopoDS_Shape & a_
+ 
+ 	for (auto& w : wires) {
+ 		wire_faces.push_back(BRepBuilderAPI_MakeFace(w).Face());
+-		wire_clss.emplace_back(wire_faces.back(), eps);
++		wire_clss.push_back(std::make_unique<BRepTopAdaptor_FClass2d>(wire_faces.back(), eps));
+ 		sass.push_back(std::make_unique<ShapeAnalysis_Surface>(BRep_Tool::Surface(wire_faces.back())));
+ 	}
+ 
+@@ -746,7 +746,7 @@ bool IfcGeom::util::boolean_subtraction_2d_using_builder(const TopoDS_Shape & a_
+ 
+ 		auto pnt = BRep_Tool::Pnt(v);
+ 		auto p2d = sass[0]->ValueOfUV(pnt, eps);
+-		if (wire_clss[0].Perform(p2d) != TopAbs_IN) {
++		if (wire_clss[0]->Perform(p2d) != TopAbs_IN) {
+ 			// A wire is not contained in the outer wire, it's a subtraction without
+ 			// any effect and marked as redundant. Feeding it to the builder algo
+ 			// will likely cause problems.
+@@ -788,7 +788,7 @@ bool IfcGeom::util::boolean_subtraction_2d_using_builder(const TopoDS_Shape & a_
+ 
+ 			auto pnt = BRep_Tool::Pnt(v);
+ 			auto p2d = sass[wire_index]->ValueOfUV(pnt, eps);
+-			if (wire_clss[wire_index].Perform(p2d) == TopAbs_IN) {
++			if (wire_clss[wire_index]->Perform(p2d) == TopAbs_IN) {
+ 				// A wire is contained within another operand
+ 				redundant[other_index] = true;
+ 				Logger::Notice("Subtraction operand contained in other");
+diff --git a/src/ifcgeom/kernels/opencascade/loop.cpp b/src/ifcgeom/kernels/opencascade/loop.cpp
+index 581cbf8..05e6c62 100644
+--- a/src/ifcgeom/kernels/opencascade/loop.cpp
++++ b/src/ifcgeom/kernels/opencascade/loop.cpp
+@@ -39,8 +39,8 @@ namespace {
+ 
+ 			const bool is_rational = !!bc->weights;
+ 
+-			TColgp_Array1OfPnt      Poles(0, bc->control_points.size() - 1);
+-			TColStd_Array1OfReal    Weights(0, bc->control_points.size() - 1);
++			TColgp_Array1OfPnt      Poles(0, (int)bc->control_points.size() - 1);
++			TColStd_Array1OfReal    Weights(0, (int)bc->control_points.size() - 1);
+ 			TColStd_Array1OfReal    Knots(0, (int)bc->knots.size() - 1);
+ 			TColStd_Array1OfInteger Mults(0, (int)bc->knots.size() - 1);
+ 			Standard_Integer        Degree = bc->degree;
+diff --git a/src/ifcgeom/kernels/opencascade/occt8_compat.hxx b/src/ifcgeom/kernels/opencascade/occt8_compat.hxx
+new file mode 100644
+index 0000000..f945b27
+--- /dev/null
++++ b/src/ifcgeom/kernels/opencascade/occt8_compat.hxx
+@@ -0,0 +1,58 @@
++// FCWEB: IfcOpenShell 0.8.0 against OCCT 8.x.
++//
++// OCCT 8 dropped the Handle_<Class> typedefs, and its collection aliases (TopTools_ListOfShape,
++// TColgp_Array1OfPnt, ...) now live in deprecated headers that nothing includes on the way.
++// Force-included into every translation unit (configure-ifcopenshell-weh.sh), so it does
++// nothing where OCCT is not on the include path or is older than 8.0.
++#pragma once
++#if defined(__has_include)
++#if __has_include(<Standard_Version.hxx>)
++#include <Standard_Version.hxx>
++#if OCC_VERSION_HEX >= 0x080000
++#include <Standard_Handle.hxx>
++#include <IntRes2d_SequenceOfIntersectionPoint.hxx>
++#include <Poly_Array1OfTriangle.hxx>
++#include <TColStd_Array1OfInteger.hxx>
++#include <TColStd_Array1OfReal.hxx>
++#include <TColStd_Array2OfReal.hxx>
++#include <TColStd_SequenceOfReal.hxx>
++#include <TColgp_Array1OfPnt.hxx>
++#include <TColgp_Array1OfPnt2d.hxx>
++#include <TColgp_Array2OfPnt.hxx>
++#include <TColgp_SequenceOfPnt.hxx>
++#include <TopTools_DataMapOfShapeInteger.hxx>
++#include <TopTools_DataMapOfShapeListOfShape.hxx>
++#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
++#include <TopTools_IndexedMapOfShape.hxx>
++#include <TopTools_ListOfShape.hxx>
++#include <TopTools_MapOfShape.hxx>
++#include <Message_ListOfMsg.hxx>
++#include <ShapeExtend_DataMapOfShapeListOfMsg.hxx>
++#include <BRepCheck_ListOfStatus.hxx>
++#include <Geom_BSplineCurve.hxx>
++typedef opencascade::handle<Geom_BSplineCurve> Handle_Geom_BSplineCurve;
++#include <Geom_BSplineSurface.hxx>
++typedef opencascade::handle<Geom_BSplineSurface> Handle_Geom_BSplineSurface;
++#include <Geom_BezierCurve.hxx>
++typedef opencascade::handle<Geom_BezierCurve> Handle_Geom_BezierCurve;
++#include <Geom_Circle.hxx>
++typedef opencascade::handle<Geom_Circle> Handle_Geom_Circle;
++#include <Geom_Curve.hxx>
++typedef opencascade::handle<Geom_Curve> Handle_Geom_Curve;
++#include <Geom_CylindricalSurface.hxx>
++typedef opencascade::handle<Geom_CylindricalSurface> Handle_Geom_CylindricalSurface;
++#include <Geom_Ellipse.hxx>
++typedef opencascade::handle<Geom_Ellipse> Handle_Geom_Ellipse;
++#include <Geom_Line.hxx>
++typedef opencascade::handle<Geom_Line> Handle_Geom_Line;
++#include <Geom_Plane.hxx>
++typedef opencascade::handle<Geom_Plane> Handle_Geom_Plane;
++#include <Geom_Surface.hxx>
++typedef opencascade::handle<Geom_Surface> Handle_Geom_Surface;
++#include <Geom_TrimmedCurve.hxx>
++typedef opencascade::handle<Geom_TrimmedCurve> Handle_Geom_TrimmedCurve;
++#include <Poly_Triangulation.hxx>
++typedef opencascade::handle<Poly_Triangulation> Handle_Poly_Triangulation;
++#endif
++#endif
++#endif
