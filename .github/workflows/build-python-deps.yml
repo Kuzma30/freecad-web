@@ -177,7 +177,22 @@ jobs:
       - name: Build tools (meson, ninja, pybind11, setuptools)
         run: |
           set -e
-          '${{ steps.hostpy.outputs.python-path }}' -m venv .qtvenv
+          PY='${{ steps.hostpy.outputs.python-path }}'
+          echo "  host python: $PY"
+          "$PY" -VV
+          rm -rf .qtvenv
+          "$PY" -m venv .qtvenv
+          # On a self-hosted box venv has been seen to exit 0 and leave no activate script,
+          # which only surfaced one line later as "No such file". Say what is on disk and
+          # try virtualenv before giving up.
+          if [ ! -f .qtvenv/bin/activate ]; then
+            echo "::warning::venv left no .qtvenv/bin/activate"
+            ls -la .qtvenv .qtvenv/bin 2>&1 | sed 's/^/    /' || true
+            "$PY" -m pip --version 2>/dev/null || "$PY" -m ensurepip --upgrade
+            "$PY" -m pip install --quiet virtualenv
+            "$PY" -m virtualenv --clear .qtvenv
+          fi
+          [ -f .qtvenv/bin/activate ] || { echo "::error::could not create .qtvenv with $PY"; exit 1; }
           . .qtvenv/bin/activate
           python -m pip install --quiet --upgrade pip
           # cython: numpy's meson.build declares it as a compiler, so meson refuses to configure
