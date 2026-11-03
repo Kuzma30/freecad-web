@@ -1,7 +1,7 @@
-From 3fe3315184936cfa9c310f5e87b1ba15bbf78cf4 Mon Sep 17 00:00:00 2001
+From f3e6ccde5831c7d3ff78db946a413eb038cb6247 Mon Sep 17 00:00:00 2001
 From: Kuzma30 <kuzemkoa@gmail.com>
 Date: Wed, 28 Oct 2026 10:09:20 +0200
-Subject: [PATCH 20/24] Modeling Algorithms - Fillet a square hole edge by
+Subject: [PATCH 20/25] Modeling Algorithms - Fillet a square hole edge by
  edge, corner patches on spheres
 
 FreeCAD issue 20085, a cube of 20 with fillets of radius 6 and a square
@@ -76,7 +76,7 @@ Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
  create mode 100644 tests/bugs/modalg_8/fillet_rounded_cube_square_hole_second_fillet
 
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
-index 0dc2bd035..303e978b4 100644
+index 0dc2bd03..303e978b 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
 @@ -19,6 +19,7 @@
@@ -241,7 +241,7 @@ index 0dc2bd035..303e978b4 100644
            return;
          }
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
-index e639f3c67..171729d01 100644
+index e639f3c6..171729d0 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
 @@ -822,6 +822,26 @@ private:
@@ -272,7 +272,7 @@ index e639f3c67..171729d01 100644
    //! the tangent plane of a support it had left, when the faces beyond the
    //! arcs of its two sides are two faces of one surface meeting at the
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
-index 674a10541..f1c6e4660 100644
+index 674a1054..f1c6e466 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
 @@ -66,6 +66,11 @@
@@ -801,7 +801,7 @@ index 674a10541..f1c6e4660 100644
            // The same configuration seen from the other side of the fillet
            // (the faces are found from the arc of CV1): the fillet is cut by
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_CnCrn.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_CnCrn.cxx
-index 922c86340..f0541e1c8 100644
+index 922c8634..f0541e1c 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_CnCrn.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_CnCrn.cxx
 @@ -64,6 +64,13 @@
@@ -1062,7 +1062,7 @@ index 922c86340..f0541e1c8 100644
  
            // construction of borders for Plate
 diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
-index 48fe4a1cc..9eb1ebeb5 100644
+index 48fe4a1c..9eb1ebeb 100644
 --- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 @@ -1540,3 +1540,134 @@ TEST(BRepFilletAPI_MakeFilletTest, FilletTraceOnTangentEdge_CoversFaceExactly)
@@ -1201,7 +1201,7 @@ index 48fe4a1cc..9eb1ebeb5 100644
 +  EXPECT_NEAR(aProps.CentreOfMass().Y(), 0.0, 5.e-4);
 +}
 diff --git a/tests/blend/buildevol/D8 b/tests/blend/buildevol/D8
-index e19b495da..52ac761cd 100644
+index e19b495d..52ac761c 100644
 --- a/tests/blend/buildevol/D8
 +++ b/tests/blend/buildevol/D8
 @@ -1,4 +1,3 @@
@@ -1210,7 +1210,7 @@ index e19b495da..52ac761cd 100644
  mkplane w w
  revol s w 0 0 0 0 0 1 270
 diff --git a/tests/blend/simple/H8 b/tests/blend/simple/H8
-index ee885211c..739cb2486 100644
+index ee885211..739cb248 100644
 --- a/tests/blend/simple/H8
 +++ b/tests/blend/simple/H8
 @@ -1,4 +1,3 @@
@@ -1220,7 +1220,7 @@ index ee885211c..739cb2486 100644
  revol s w 0 0 0 0 0 1 270
 diff --git a/tests/bugs/modalg_8/fillet_rounded_cube_all_edges_symmetric b/tests/bugs/modalg_8/fillet_rounded_cube_all_edges_symmetric
 new file mode 100644
-index 000000000..90c974410
+index 00000000..90c97441
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_rounded_cube_all_edges_symmetric
 @@ -0,0 +1,30 @@
@@ -1256,7 +1256,7 @@ index 000000000..90c974410
 +}
 diff --git a/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_second_fillet b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_second_fillet
 new file mode 100644
-index 000000000..b5f7b0757
+index 00000000..b5f7b075
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_second_fillet
 @@ -0,0 +1,43 @@

@@ -1,7 +1,7 @@
-From f7ae5e6d147f61e9e863cc96aa1d60f80e8ff348 Mon Sep 17 00:00:00 2001
+From 2b06e2eb049953823cd947ab60824abc7e89d46e Mon Sep 17 00:00:00 2001
 From: Kuzma30 <kuzemkoa@gmail.com>
 Date: Mon, 26 Oct 2026 10:09:17 +0200
-Subject: [PATCH 14/24] Modeling Algorithms - Keep the pcurves of fused edges
+Subject: [PATCH 14/25] Modeling Algorithms - Keep the pcurves of fused edges
  on the ranges of the edges
 
 BRepLib_FuseEdges::UpdatePCurve took a B-spline pcurve whole when it joined
@@ -30,7 +30,7 @@ Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
  create mode 100644 src/ModelingAlgorithms/TKTopAlgo/GTests/BRepLib_FuseEdges_Test.cxx
 
 diff --git a/src/ModelingAlgorithms/TKTopAlgo/BRepLib/BRepLib_FuseEdges.cxx b/src/ModelingAlgorithms/TKTopAlgo/BRepLib/BRepLib_FuseEdges.cxx
-index d3de01def..cc0100476 100644
+index d3de01de..cc010047 100644
 --- a/src/ModelingAlgorithms/TKTopAlgo/BRepLib/BRepLib_FuseEdges.cxx
 +++ b/src/ModelingAlgorithms/TKTopAlgo/BRepLib/BRepLib_FuseEdges.cxx
 @@ -1138,10 +1138,18 @@ bool BRepLib_FuseEdges::UpdatePCurve(const TopoDS_Edge&                    theOl
@@ -66,7 +66,7 @@ index d3de01def..cc0100476 100644
              }
 diff --git a/src/ModelingAlgorithms/TKTopAlgo/GTests/BRepLib_FuseEdges_Test.cxx b/src/ModelingAlgorithms/TKTopAlgo/GTests/BRepLib_FuseEdges_Test.cxx
 new file mode 100644
-index 000000000..63b99e2af
+index 00000000..63b99e2a
 --- /dev/null
 +++ b/src/ModelingAlgorithms/TKTopAlgo/GTests/BRepLib_FuseEdges_Test.cxx
 @@ -0,0 +1,152 @@
@@ -223,7 +223,7 @@ index 000000000..63b99e2af
 +  EXPECT_TRUE(isFound);
 +}
 diff --git a/src/ModelingAlgorithms/TKTopAlgo/GTests/FILES.cmake b/src/ModelingAlgorithms/TKTopAlgo/GTests/FILES.cmake
-index 61f8e4c25..3a629d6a1 100644
+index 61f8e4c2..3a629d6a 100644
 --- a/src/ModelingAlgorithms/TKTopAlgo/GTests/FILES.cmake
 +++ b/src/ModelingAlgorithms/TKTopAlgo/GTests/FILES.cmake
 @@ -15,6 +15,7 @@ set(OCCT_TKTopAlgo_GTests_FILES

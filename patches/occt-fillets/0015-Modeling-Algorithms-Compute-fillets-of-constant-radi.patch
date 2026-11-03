@@ -1,7 +1,7 @@
-From d4901b07a230dbaba62247a4ff35d5e5a8c0d2af Mon Sep 17 00:00:00 2001
+From 121c56d77a8639e0522789069b29b8d40db53158 Mon Sep 17 00:00:00 2001
 From: Kuzma30 <kuzemkoa@gmail.com>
 Date: Mon, 26 Oct 2026 14:46:15 +0200
-Subject: [PATCH 15/24] Modeling Algorithms - Compute fillets of constant
+Subject: [PATCH 15/25] Modeling Algorithms - Compute fillets of constant
  radius as rolling balls
 
 BlendFunc_ConstRad took the center of a section of the fillet from the
@@ -67,7 +67,7 @@ Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
  20 files changed, 787 insertions(+), 120 deletions(-)
 
 diff --git a/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRad.cxx b/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRad.cxx
-index 08e0bb20a..f41319cc0 100644
+index 08e0bb20..f41319cc 100644
 --- a/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRad.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRad.cxx
 @@ -40,6 +40,80 @@
@@ -626,7 +626,7 @@ index 08e0bb20a..f41319cc0 100644
                          pts2,
                          std::abs(ray1),
 diff --git a/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRad.hxx b/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRad.hxx
-index 00a6ce9b0..065365548 100644
+index 00a6ce9b..06536554 100644
 --- a/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRad.hxx
 +++ b/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRad.hxx
 @@ -117,6 +117,13 @@ public:
@@ -662,7 +662,7 @@ index 00a6ce9b0..065365548 100644
    gp_Pnt                         pts2;
    bool                           istangent;
 diff --git a/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRadInv.cxx b/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRadInv.cxx
-index 9e51629d0..b12549c6e 100644
+index 9e51629d..b12549c6 100644
 --- a/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRadInv.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRadInv.cxx
 @@ -28,6 +28,7 @@ BlendFunc_ConstRadInv::BlendFunc_ConstRadInv(const occ::handle<Adaptor3d_Surface
@@ -913,7 +913,7 @@ index 9e51629d0..b12549c6e 100644
    gp_Vec   d2u1, d2v1, d2uv1, d2u2, d2v2, d2uv2, d2cur;
    gp_Vec   ns1, ns2, nplan, dnplan, ncrossns1, ncrossns2, resul1, resul2, temp;
 diff --git a/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRadInv.hxx b/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRadInv.hxx
-index 840822616..0892fb38d 100644
+index 84082261..0892fb38 100644
 --- a/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRadInv.hxx
 +++ b/src/ModelingAlgorithms/TKFillet/BlendFunc/BlendFunc_ConstRadInv.hxx
 @@ -64,11 +64,16 @@ public:
@@ -934,7 +934,7 @@ index 840822616..0892fb38d 100644
    double                         ray2;
    int                            choix;
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
-index fff61e6f6..8815a650c 100644
+index fff61e6f..8815a650 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
 @@ -40,6 +40,9 @@
@@ -1050,7 +1050,7 @@ index fff61e6f6..8815a650c 100644
  
    if (myListStripe.IsEmpty())
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
-index 2f67b2cec..0c66f1281 100644
+index 2f67b2ce..0c66f128 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
 @@ -769,8 +769,17 @@ protected:
@@ -1072,7 +1072,7 @@ index 2f67b2cec..0c66f1281 100644
                                      const TopoDS_Edge&   E1,
                                      const TopoDS_Vertex& V) const;
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_1.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_1.cxx
-index ee5a5f36e..056b6c224 100644
+index ee5a5f36..056b6c22 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_1.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_1.cxx
 @@ -340,6 +340,8 @@ static TopOpeBRepDS_BuildTool mkbuildtool()
@@ -1085,7 +1085,7 @@ index ee5a5f36e..056b6c224 100644
  {
    myDS   = new TopOpeBRepDS_HDataStructure();
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx
-index 15bbf7fe5..b74d8968e 100644
+index 15bbf7fe..b74d8968 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx
 @@ -576,8 +576,11 @@ bool ChFi3d_FilBuilder::SimulSurf(occ::handle<ChFiDS_SurfData>&           Data,
@@ -1156,7 +1156,7 @@ index 15bbf7fe5..b74d8968e 100644
  
      double rad        = fsp->Radius();
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C3.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C3.cxx
-index fe4493d11..df03c86eb 100644
+index fe4493d1..df03c86e 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C3.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C3.cxx
 @@ -751,8 +751,11 @@ void ChFi3d_FilBuilder::PerformThreeCorner(const int Jndex)
@@ -1173,7 +1173,7 @@ index fe4493d11..df03c86eb 100644
          func.Set(myShape);
          finv.Set(Rdeb, choix);
 diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
-index 383bd475a..927f4769f 100644
+index 383bd475..927f4769 100644
 --- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 @@ -30,6 +30,11 @@
@@ -1287,7 +1287,7 @@ index 383bd475a..927f4769f 100644
 +  EXPECT_EQ(aNbFillets, 1);
 +}
 diff --git a/tests/blend/simple/C8 b/tests/blend/simple/C8
-index aec58a22b..3a6dfcc03 100644
+index aec58a22..3a6dfcc0 100644
 --- a/tests/blend/simple/C8
 +++ b/tests/blend/simple/C8
 @@ -9,4 +9,4 @@ trotate s 0 0 0 0 0 1 90
@@ -1297,7 +1297,7 @@ index aec58a22b..3a6dfcc03 100644
 -checkprops result -s 9640.68
 +checkprops result -s 9781.91
 diff --git a/tests/blend/simple/D1 b/tests/blend/simple/D1
-index 03ee7ed45..056b3e2f3 100644
+index 03ee7ed4..056b3e2f 100644
 --- a/tests/blend/simple/D1
 +++ b/tests/blend/simple/D1
 @@ -9,4 +9,4 @@ trotate s 0 0 0 0 0 1 270
@@ -1307,7 +1307,7 @@ index 03ee7ed45..056b3e2f3 100644
 -checkprops result -s 9940.87
 +checkprops result -s 10080.1
 diff --git a/tests/bugs/modalg_8/fillet_root_rolling_on_wall_fillet b/tests/bugs/modalg_8/fillet_root_rolling_on_wall_fillet
-index f8261e1f9..ec659ddea 100644
+index f8261e1f..ec659dde 100644
 --- a/tests/bugs/modalg_8/fillet_root_rolling_on_wall_fillet
 +++ b/tests/bugs/modalg_8/fillet_root_rolling_on_wall_fillet
 @@ -16,4 +16,4 @@ blend result b 0.7 b_42
@@ -1317,7 +1317,7 @@ index f8261e1f9..ec659ddea 100644
 -checkprops result -v 8691.48 -s 3034.92
 +checkprops result -v 8691.5 -s 3034.8
 diff --git a/tests/bugs/modalg_8/fillet_thread_convex_concave_corner b/tests/bugs/modalg_8/fillet_thread_convex_concave_corner
-index 97b429090..28199f3e6 100644
+index 97b42909..28199f3e 100644
 --- a/tests/bugs/modalg_8/fillet_thread_convex_concave_corner
 +++ b/tests/bugs/modalg_8/fillet_thread_convex_concave_corner
 @@ -13,5 +13,5 @@ explode b E
@@ -1329,7 +1329,7 @@ index 97b429090..28199f3e6 100644
 +checkmaxtol result -ref 1.33e-4
 +checkprops result -v 8681.03 -s 3081.64
 diff --git a/tests/bugs/modalg_8/fillet_thread_on_seam b/tests/bugs/modalg_8/fillet_thread_on_seam
-index 1294e44f4..6c6471f6d 100644
+index 1294e44f..6c6471f6 100644
 --- a/tests/bugs/modalg_8/fillet_thread_on_seam
 +++ b/tests/bugs/modalg_8/fillet_thread_on_seam
 @@ -13,5 +13,5 @@ explode b E
@@ -1341,7 +1341,7 @@ index 1294e44f4..6c6471f6d 100644
 +checkmaxtol result -ref 1.33e-4
 +checkprops result -v 8680.58 -deps 1.e-5
 diff --git a/tests/bugs/modalg_8/fillet_wall_profile_corner_at_root b/tests/bugs/modalg_8/fillet_wall_profile_corner_at_root
-index e4c05570f..86aae38bf 100644
+index e4c05570..86aae38b 100644
 --- a/tests/bugs/modalg_8/fillet_wall_profile_corner_at_root
 +++ b/tests/bugs/modalg_8/fillet_wall_profile_corner_at_root
 @@ -15,5 +15,5 @@ explode b E
@@ -1353,7 +1353,7 @@ index e4c05570f..86aae38bf 100644
 +checkmaxtol result -ref 1.83e-4
 +checkprops result -v 8708.11 -s 3016.39
 diff --git a/tests/bugs/modalg_8/fillet_wall_profile_cusp_ends b/tests/bugs/modalg_8/fillet_wall_profile_cusp_ends
-index 3d658310a..5669131fb 100644
+index 3d658310..5669131f 100644
 --- a/tests/bugs/modalg_8/fillet_wall_profile_cusp_ends
 +++ b/tests/bugs/modalg_8/fillet_wall_profile_cusp_ends
 @@ -15,5 +15,5 @@ explode b E
@@ -1365,7 +1365,7 @@ index 3d658310a..5669131fb 100644
 +checkmaxtol result -ref 1.83e-4
 +checkprops result -v 8706.68 -s 3017.86
 diff --git a/tests/bugs/modalg_8/fillet_wall_profile_over_root b/tests/bugs/modalg_8/fillet_wall_profile_over_root
-index 9cdf863c0..a330c0e10 100644
+index 9cdf863c..a330c0e1 100644
 --- a/tests/bugs/modalg_8/fillet_wall_profile_over_root
 +++ b/tests/bugs/modalg_8/fillet_wall_profile_over_root
 @@ -5,11 +5,11 @@ puts "============"
@@ -1392,7 +1392,7 @@ index 9cdf863c0..a330c0e10 100644
 -checkprops result -v 8707.45 -s 3016.81
 +checkprops result -v 8707.58 -s 3016.86
 diff --git a/tests/bugs/modalg_8/fillet_wall_profile_smooth_at_root b/tests/bugs/modalg_8/fillet_wall_profile_smooth_at_root
-index 50330b531..7e106affa 100644
+index 50330b53..7e106aff 100644
 --- a/tests/bugs/modalg_8/fillet_wall_profile_smooth_at_root
 +++ b/tests/bugs/modalg_8/fillet_wall_profile_smooth_at_root
 @@ -4,11 +4,10 @@ puts "(FreeCAD screw: edges of the start wall, radius 0.8)"
@@ -1418,7 +1418,7 @@ index 50330b531..7e106affa 100644
 -checkprops result -v 8707.03 -s 3017.3
 +checkprops result -v 8707.04 -s 3017.32
 diff --git a/tests/bugs/modalg_8/fillet_wall_start_after_extension b/tests/bugs/modalg_8/fillet_wall_start_after_extension
-index 2a72d162c..9ec90a1c8 100644
+index 2a72d162..9ec90a1c 100644
 --- a/tests/bugs/modalg_8/fillet_wall_start_after_extension
 +++ b/tests/bugs/modalg_8/fillet_wall_start_after_extension
 @@ -15,5 +15,5 @@ explode b E

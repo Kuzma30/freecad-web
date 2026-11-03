@@ -1,7 +1,7 @@
-From 1c30d9455b1455ee6e5ec710570bff581cbc39aa Mon Sep 17 00:00:00 2001
+From e696df8a8539951bfa0752233e2ad470cf4ab0fc Mon Sep 17 00:00:00 2001
 From: Kuzma30 <kuzemkoa@gmail.com>
 Date: Wed, 28 Oct 2026 15:28:31 +0200
-Subject: [PATCH 23/24] Modeling Algorithms - Count only the surfdatas of the
+Subject: [PATCH 23/25] Modeling Algorithms - Count only the surfdatas of the
  end edge at the end of a fillet
 
 FreeCAD issue 20085, a cube of 20 with fillets of radius 6 and a square
@@ -43,7 +43,7 @@ Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
  create mode 100644 tests/bugs/modalg_8/fillet_rounded_cube_square_hole_rim_after_corner
 
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
-index d56dd783a..7ae693505 100644
+index d56dd783..7ae69350 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
 @@ -5177,8 +5177,8 @@ void ChFi3d_Builder::PerformIntersectionAtEnd(const int Index)
@@ -84,7 +84,7 @@ index d56dd783a..7ae693505 100644
      ChFi3d_edge_common_faces(myEFMap(EdgeSpine), F1, F2);
      if (F1.IsSame(facecouture))
 diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
-index fbae6ec56..ef8d253b4 100644
+index fbae6ec5..ef8d253b 100644
 --- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 @@ -1812,3 +1812,82 @@ TEST(BRepFilletAPI_MakeFilletTest, SquareHoleInRoundedCube_ConvexAndConcaveFille
@@ -172,7 +172,7 @@ index fbae6ec56..ef8d253b4 100644
 +}
 diff --git a/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_rim_after_corner b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_rim_after_corner
 new file mode 100644
-index 000000000..3d7322fb2
+index 00000000..3d7322fb
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_rim_after_corner
 @@ -0,0 +1,40 @@

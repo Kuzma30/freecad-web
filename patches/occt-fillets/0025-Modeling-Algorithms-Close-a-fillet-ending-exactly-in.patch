@@ -1,0 +1,302 @@
+From 94049374d23b9d1974f987ab73e9c69bded39768 Mon Sep 17 00:00:00 2001
+From: Kuzma30 <kuzemkoa@gmail.com>
+Date: Tue, 3 Nov 2026 13:50:40 +0200
+Subject: [PATCH 25/25] Modeling Algorithms - Close a fillet ending exactly in
+ the plane of the face at its end
+
+PerformCapOnEndFace closes a fillet with a cap on the face beyond the arc
+where one of its sides leaves the support, when the trace of the fillet on
+the opposite support face reaches that face: the end of the trace at the
+vertex and its middle must lie on the two sides of it. When the fillet ends
+exactly in the plane of that face, the end of the trace is on the plane, and
+the sign of its distance is rounding noise. In the model of FreeCAD issue
+32231 (a rim revolved over a quarter turn on a ring, the concave edges
+between the outside of the ring and the end walls of the rim ending in the
+top of the ring) the distance was +4e-17 at one end wall and -0 at the
+other. One corner was capped in the top of the ring, the other went to
+PerformIntersectionAtEnd, whose patch went up the rim to 2.7 above the top
+of the ring for a radius of 0.2, with a tolerance of 0.012. A chamfer of
+the same edges failed at both walls.
+
+An end within the tolerance of the vertex now counts as reaching the face,
+whatever the sign of its distance. The two corners are then alike: the
+fillet or chamfer stops in the top of the ring and nothing above it
+changes, which is what the FreeCAD pull request 32296 obtains by cutting
+the result with a half space after the fact.
+
+Test bugs/modalg_8/fillet_rim_on_ring_stops_at_ring_top, from the model of
+the issue (data file freecad32231_rim_on_ring.brep); GTest for the same
+construction, which does not hit the rounding but checks the result.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
+---
+ .../TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx     |   6 +-
+ .../GTests/BRepFilletAPI_MakeFillet_Test.cxx  | 178 ++++++++++++++++++
+ .../fillet_rim_on_ring_stops_at_ring_top      |  37 ++++
+ 3 files changed, 219 insertions(+), 2 deletions(-)
+ create mode 100644 tests/bugs/modalg_8/fillet_rim_on_ring_stops_at_ring_top
+
+diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
+index 9555acca..4e44107e 100644
+--- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
++++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
+@@ -2222,7 +2222,8 @@ bool ChFi3d_Builder::PerformCapOnEndFace(const int theIndex)
+     // The fillet must reach the surface of Fv on Fop: the end of its trace
+     // at this vertex and the middle of it lie on the two sides. The other end
+     // is not used, it may stop at another such face (an arc between two
+-    // corners).
++    // corners). An end within the tolerance of the vertex lies on the surface
++    // (the trace starts at the vertex), whatever the sign of its distance.
+     const ChFiDS_FaceInterference& aFiop = Fd->Interference(3 - aFadArc);
+     if (aFiop.LineIndex() == 0)
+     {
+@@ -2237,7 +2238,8 @@ bool ChFi3d_Builder::PerformCapOnEndFace(const int theIndex)
+     const double aMid  = 0.5 * (aFiop.FirstParameter() + aFiop.LastParameter());
+     double       aD1 = 0., aD2 = 0.;
+     if (!SideOfSurface(aFvSurf, aC3d->Value(anEnd), aD1)
+-        || !SideOfSurface(aFvSurf, aC3d->Value(aMid), aD2) || aD1 * aD2 > 0.)
++        || !SideOfSurface(aFvSurf, aC3d->Value(aMid), aD2)
++        || (std::abs(aD1) > BRep_Tool::Tolerance(Vtx) && aD1 * aD2 > 0.))
+     {
+       continue;
+     }
+diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+index c4847b50..280d9e5e 100644
+--- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
++++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
+@@ -24,6 +24,7 @@
+ #include <BRepBuilderAPI_Sewing.hxx>
+ #include <BRepBuilderAPI_Transform.hxx>
+ #include <BRepCheck_Analyzer.hxx>
++#include <BRepFilletAPI_MakeChamfer.hxx>
+ #include <BRepFilletAPI_MakeFillet.hxx>
+ #include <BRepGProp.hxx>
+ #include <ChFi3d_FilletShape.hxx>
+@@ -2037,3 +2038,180 @@ TEST(BRepFilletAPI_MakeFilletTest, SquareHoleInRoundedCube_ThreeFilletsCornerAsI
+     EXPECT_EQ(aNbUntraced, 0) << "r = " << aRadius;
+   }
+ }
++
++//=================================================================================================
++// A rim on a ring with concave edges ending in the top of the ring (FreeCAD issue 32231)
++
++namespace
++{
++// A quarter of a rim on a ring, as in FreeCAD issue 32231: the ring
++// 31.4 < r < 33.4, -1.45 < z < 0, and the rim 33.4 < r < 34.9 from -1.45 to
++// 8.55 between the half planes y = 0, x > 0 and x = 0, y < 0, with a 0.5 x 45
++// degrees chamfer at the bottom outside. The top edges of the two end walls
++// are rounded with radius 5, and the outer edge of the fillet at y < 0 with
++// radius 1, each step refined as FreeCAD does.
++TopoDS_Shape makeRimOnRing()
++{
++  const gp_Ax1               anAxis(gp::Origin(), gp::DZ());
++  BRepBuilderAPI_MakePolygon aRing(gp_Pnt(31.4, 0.0, -1.45),
++                                   gp_Pnt(33.4, 0.0, -1.45),
++                                   gp_Pnt(33.4, 0.0, 0.0),
++                                   gp_Pnt(31.4, 0.0, 0.0),
++                                   true);
++  BRepBuilderAPI_MakePolygon aRim;
++  aRim.Add(gp_Pnt(33.4, 0.0, -1.45));
++  aRim.Add(gp_Pnt(34.4, 0.0, -1.45));
++  aRim.Add(gp_Pnt(34.9, 0.0, -0.95));
++  aRim.Add(gp_Pnt(34.9, 0.0, 8.55));
++  aRim.Add(gp_Pnt(33.4, 0.0, 8.55));
++  aRim.Close();
++  const TopoDS_Shape aRingSolid =
++    BRepPrimAPI_MakeRevol(BRepBuilderAPI_MakeFace(aRing.Wire(), true).Face(), anAxis).Shape();
++  const TopoDS_Shape aRimSolid =
++    BRepPrimAPI_MakeRevol(BRepBuilderAPI_MakeFace(aRim.Wire(), true).Face(), anAxis, -M_PI / 2.0)
++      .Shape();
++  const auto refine = [](const TopoDS_Shape& theShape) {
++    ShapeUpgrade_UnifySameDomain aUnify(theShape);
++    aUnify.Build();
++    return aUnify.Shape();
++  };
++  TopoDS_Shape aShape = refine(BRepAlgoAPI_Fuse(aRingSolid, aRimSolid).Shape());
++
++  // the top edges of the end walls
++  BRepFilletAPI_MakeFillet aTop(aShape);
++  for (TopExp_Explorer anExp(aShape, TopAbs_EDGE); anExp.More(); anExp.Next())
++  {
++    BRepAdaptor_Curve aCurve(TopoDS::Edge(anExp.Current()));
++    const gp_Pnt      aMid = aCurve.Value(0.5 * (aCurve.FirstParameter() + aCurve.LastParameter()));
++    if (aCurve.GetType() == GeomAbs_Line && std::abs(aMid.Z() - 8.55) < 1.e-6)
++    {
++      aTop.Add(5.0, TopoDS::Edge(anExp.Current()));
++    }
++  }
++  aTop.Build();
++  if (!aTop.IsDone())
++  {
++    return TopoDS_Shape();
++  }
++  aShape = refine(aTop.Shape());
++
++  // the outer edge of the fillet at y < 0, from (0, -34.9, 3.55)
++  BRepFilletAPI_MakeFillet anOuter(aShape);
++  for (TopExp_Explorer anExp(aShape, TopAbs_EDGE); anExp.More(); anExp.Next())
++  {
++    const TopoDS_Edge& anEdge = TopoDS::Edge(anExp.Current());
++    if (BRepAdaptor_Curve(anEdge).GetType() == GeomAbs_Line)
++    {
++      continue;
++    }
++    for (const TopoDS_Vertex& aV : {TopExp::FirstVertex(anEdge), TopExp::LastVertex(anEdge)})
++    {
++      if (BRep_Tool::Pnt(aV).Distance(gp_Pnt(0.0, -34.9, 3.55)) < 1.e-6)
++      {
++        anOuter.Add(1.0, anEdge);
++        break;
++      }
++    }
++  }
++  anOuter.Build();
++  if (!anOuter.IsDone())
++  {
++    return TopoDS_Shape();
++  }
++  return refine(anOuter.Shape());
++}
++
++// The volume of the parts of theShape1 and theShape2 in theRegion that are not
++// in both.
++double changeIn(const TopoDS_Shape& theShape1,
++                const TopoDS_Shape& theShape2,
++                const TopoDS_Shape& theRegion)
++{
++  const TopoDS_Shape aPart1 = BRepAlgoAPI_Common(theShape1, theRegion).Shape();
++  const TopoDS_Shape aPart2 = BRepAlgoAPI_Common(theShape2, theRegion).Shape();
++  GProp_GProps       aProps1, aProps2;
++  BRepGProp::VolumeProperties(BRepAlgoAPI_Cut(aPart1, aPart2).Shape(), aProps1);
++  BRepGProp::VolumeProperties(BRepAlgoAPI_Cut(aPart2, aPart1).Shape(), aProps2);
++  return aProps1.Mass() + aProps2.Mass();
++}
++} // namespace
++
++// The edges between the outside of the ring and the end walls of the rim,
++// x = 0 and y = 0, -1.45 < z < 0, are concave. At their top vertex the top
++// of the ring z = 0 cuts the fillet or chamfer straight across: it must stop
++// there with a planar cap, and nothing above z = 0 may change (FreeCAD issue
++// 32231). In the model of the issue, the end of the trace at that vertex lay
++// 1e-16 above z = 0, and that rounding error sent the corner to
++// PerformIntersectionAtEnd, which built a patch rising over the rim (test
++// bugs/modalg_8/fillet_rim_on_ring_stops_at_ring_top).
++TEST(BRepFilletAPI_MakeFilletTest, RimOnRing_ConcaveEdgesStopAtRingTop)
++{
++  const TopoDS_Shape aShape = makeRimOnRing();
++  ASSERT_FALSE(aShape.IsNull());
++  ASSERT_TRUE(BRepCheck_Analyzer(aShape).IsValid());
++
++  TopoDS_Edge anEdgeX, anEdgeY;
++  for (TopExp_Explorer anExp(aShape, TopAbs_EDGE); anExp.More(); anExp.Next())
++  {
++    BRepAdaptor_Curve aCurve(TopoDS::Edge(anExp.Current()));
++    const gp_Pnt      aMid = aCurve.Value(0.5 * (aCurve.FirstParameter() + aCurve.LastParameter()));
++    if (aCurve.GetType() != GeomAbs_Line)
++    {
++      continue;
++    }
++    if (aMid.Distance(gp_Pnt(33.4, 0.0, -0.725)) < 1.e-6)
++    {
++      anEdgeX = TopoDS::Edge(anExp.Current());
++    }
++    else if (aMid.Distance(gp_Pnt(0.0, -33.4, -0.725)) < 1.e-6)
++    {
++      anEdgeY = TopoDS::Edge(anExp.Current());
++    }
++  }
++  ASSERT_FALSE(anEdgeX.IsNull());
++  ASSERT_FALSE(anEdgeY.IsNull());
++
++  const TopoDS_Shape anAbove =
++    BRepPrimAPI_MakeBox(gp_Pnt(-50.0, -50.0, 1.e-6), gp_Pnt(50.0, 50.0, 20.0)).Shape();
++  const TopoDS_Shape aBelow =
++    BRepPrimAPI_MakeBox(gp_Pnt(-50.0, -50.0, -50.0), gp_Pnt(50.0, 50.0, 0.0)).Shape();
++  const NCollection_List<TopoDS_Edge> aCases[] = {{anEdgeX}, {anEdgeY}, {anEdgeX, anEdgeY}};
++  for (const bool isChamfer : {false, true})
++  {
++    double anAdded[3] = {0.0, 0.0, 0.0};
++    for (int aCase = 0; aCase < 3; ++aCase)
++    {
++      TopoDS_Shape aResult;
++      if (isChamfer)
++      {
++        BRepFilletAPI_MakeChamfer aChamfer(aShape);
++        for (const TopoDS_Edge& anEdge : aCases[aCase])
++        {
++          aChamfer.Add(0.4, anEdge);
++        }
++        aChamfer.Build();
++        ASSERT_TRUE(aChamfer.IsDone()) << "chamfer, case " << aCase;
++        aResult = aChamfer.Shape();
++      }
++      else
++      {
++        BRepFilletAPI_MakeFillet aFillet(aShape);
++        for (const TopoDS_Edge& anEdge : aCases[aCase])
++        {
++          aFillet.Add(0.4, anEdge);
++        }
++        aFillet.Build();
++        ASSERT_TRUE(aFillet.IsDone()) << "fillet, case " << aCase;
++        aResult = aFillet.Shape();
++      }
++      EXPECT_TRUE(BRepCheck_Analyzer(aResult).IsValid()) << isChamfer << ", case " << aCase;
++      EXPECT_NEAR(changeIn(aShape, aResult, anAbove), 0.0, 1.e-7)
++        << isChamfer << ", case " << aCase;
++      anAdded[aCase] = changeIn(aShape, aResult, aBelow);
++    }
++    // The two corners are mirror images, and they do not interact.
++    EXPECT_GT(anAdded[0], 0.04) << isChamfer;
++    EXPECT_NEAR(anAdded[0], anAdded[1], 1.e-6) << isChamfer;
++    EXPECT_NEAR(anAdded[2], anAdded[0] + anAdded[1], 1.e-6) << isChamfer;
++  }
++}
+diff --git a/tests/bugs/modalg_8/fillet_rim_on_ring_stops_at_ring_top b/tests/bugs/modalg_8/fillet_rim_on_ring_stops_at_ring_top
+new file mode 100644
+index 00000000..223fe996
+--- /dev/null
++++ b/tests/bugs/modalg_8/fillet_rim_on_ring_stops_at_ring_top
+@@ -0,0 +1,37 @@
++puts "============"
++puts "Modeling Algorithms - Concave fillets and chamfers ending in the top of a ring"
++puts "(FreeCAD issue 32231)"
++puts "============"
++puts ""
++
++# A rim revolved over a quarter turn on a ring, its end walls rounded at the
++# top (the model of the issue). The edges b_5 and b_23 between the outside of
++# the ring and the end walls are concave and end in the top of the ring, z = 0.
++# The fillet and the chamfer must stop there with a planar cap: nothing above
++# z = 0 changes. At b_5 the end of the trace lay 1e-16 above the top of the
++# ring, and the corner was a patch going up the rim.
++restore [locate_data_file freecad32231_rim_on_ring.brep] b
++explode b E
++
++box above -50 -50 1.e-6 100 100 20
++bcommon b_above b above
++
++blend result b 0.4 b_5 0.4 b_23
++checkshape result
++checkmaxtol result -ref 1.2e-4
++checkprops result -v 1357.05 -deps 1.e-6 -s 2440.41
++bcommon r_above result above
++bcut d_added r_above b_above
++checkprops d_added -v empty
++bcut d_removed b_above r_above
++checkprops d_removed -v empty
++
++chamf result b b_5 0.4 b_23 0.4
++checkshape result
++checkmaxtol result -ref 1.2e-4
++checkprops result -v 1357.18 -deps 1.e-6 -s 2440.41
++bcommon r_above result above
++bcut d_added r_above b_above
++checkprops d_added -v empty
++bcut d_removed b_above r_above
++checkprops d_removed -v empty
+-- 
+2.43.0
+

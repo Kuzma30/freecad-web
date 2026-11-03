@@ -1,7 +1,7 @@
-From 89f16ad41a08da2718214f281c027edbed88f705 Mon Sep 17 00:00:00 2001
+From 070de60d504d7ed738f59880778a88d218e1334e Mon Sep 17 00:00:00 2001
 From: Kuzma30 <kuzemkoa@gmail.com>
 Date: Tue, 27 Oct 2026 15:49:53 +0200
-Subject: [PATCH 19/24] Modeling Algorithms - Reuse a tangent edge as the trace
+Subject: [PATCH 19/25] Modeling Algorithms - Reuse a tangent edge as the trace
  of a fillet
 
 A box of 20 with fillets of radius 3 on all edges has a flat top of
@@ -53,7 +53,7 @@ Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
  create mode 100644 tests/bugs/modalg_8/fillet_trace_on_tangent_edge
 
 diff --git a/src/ModelingAlgorithms/TKBool/TopOpeBRepBuild/TopOpeBRepBuild_BuildFaces.cxx b/src/ModelingAlgorithms/TKBool/TopOpeBRepBuild/TopOpeBRepBuild_BuildFaces.cxx
-index 2db986bfa..ec440a220 100644
+index 2db986bf..ec440a22 100644
 --- a/src/ModelingAlgorithms/TKBool/TopOpeBRepBuild/TopOpeBRepBuild_BuildFaces.cxx
 +++ b/src/ModelingAlgorithms/TKBool/TopOpeBRepBuild/TopOpeBRepBuild_BuildFaces.cxx
 @@ -112,6 +112,11 @@ void TopOpeBRepBuild_Builder::BuildFaces(const int
@@ -69,7 +69,7 @@ index 2db986bfa..ec440a220 100644
        const occ::handle<Geom2d_Curve>& PC = SCurves.PCurve();
        myBuildTool.PCurve(aFace, anEdge, CDS, PC);
 diff --git a/src/ModelingAlgorithms/TKBool/TopOpeBRepBuild/TopOpeBRepBuild_Builder.cxx b/src/ModelingAlgorithms/TKBool/TopOpeBRepBuild/TopOpeBRepBuild_Builder.cxx
-index 01fe86885..ebfeaee52 100644
+index 01fe8688..ebfeaee5 100644
 --- a/src/ModelingAlgorithms/TKBool/TopOpeBRepBuild/TopOpeBRepBuild_Builder.cxx
 +++ b/src/ModelingAlgorithms/TKBool/TopOpeBRepBuild/TopOpeBRepBuild_Builder.cxx
 @@ -83,8 +83,11 @@ static TopoDS_Shape SubstituteCoincidentEdges(
@@ -135,7 +135,7 @@ index 01fe86885..ebfeaee52 100644
    {
      const TopAbs_State                aState = aStateIndex == 0 ? TopAbs_IN : TopAbs_OUT;
 diff --git a/src/ModelingAlgorithms/TKBool/TopOpeBRepDS/TopOpeBRepDS_BuildTool.cxx b/src/ModelingAlgorithms/TKBool/TopOpeBRepDS/TopOpeBRepDS_BuildTool.cxx
-index 54a8e0e54..397ed3bf4 100644
+index 54a8e0e5..397ed3bf 100644
 --- a/src/ModelingAlgorithms/TKBool/TopOpeBRepDS/TopOpeBRepDS_BuildTool.cxx
 +++ b/src/ModelingAlgorithms/TKBool/TopOpeBRepDS/TopOpeBRepDS_BuildTool.cxx
 @@ -1268,11 +1268,20 @@ void TopOpeBRepDS_BuildTool::PCurve(TopoDS_Shape&                    F,
@@ -162,7 +162,7 @@ index 54a8e0e54..397ed3bf4 100644
                             aReversedPCurve,
                             aReversedPCurve->FirstParameter(),
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
-index 7b1f3ebfc..0dc2bd035 100644
+index 7b1f3ebf..0dc2bd03 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
 @@ -39,6 +39,7 @@
@@ -374,7 +374,7 @@ index 7b1f3ebfc..0dc2bd035 100644
      {
        BRep_Builder B1;
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_SpKP.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_SpKP.cxx
-index 5c18f1026..62cb3f800 100644
+index 5c18f102..62cb3f80 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_SpKP.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_SpKP.cxx
 @@ -803,6 +803,17 @@ static ChFi3d_CoincidentDomainEdge CoincidentDomainEdge(
@@ -436,7 +436,7 @@ index 5c18f1026..62cb3f800 100644
              CP1 = sov;
              if (Spine->LastStatus() != ChFiDS_OnSame)
 diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
-index fd59dfcf1..48fe4a1cc 100644
+index fd59dfcf..48fe4a1c 100644
 --- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 @@ -1473,3 +1473,70 @@ TEST(BRepFilletAPI_MakeFilletTest, SquareHoleInRoundedCube_FilletEndsInWallPlane
@@ -512,7 +512,7 @@ index fd59dfcf1..48fe4a1cc 100644
 +}
 diff --git a/tests/bugs/modalg_8/fillet_trace_on_tangent_edge b/tests/bugs/modalg_8/fillet_trace_on_tangent_edge
 new file mode 100644
-index 000000000..d5af29737
+index 00000000..d5af2973
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_trace_on_tangent_edge
 @@ -0,0 +1,35 @@

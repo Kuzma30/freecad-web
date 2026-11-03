@@ -1,7 +1,7 @@
-From 3f6cc781953db46c4160b7f43837fded6d0a0f37 Mon Sep 17 00:00:00 2001
+From 9be62b9c81eebcd3c4c36490dcf1559d36cbc95b Mon Sep 17 00:00:00 2001
 From: Kuzma30 <kuzemkoa@gmail.com>
 Date: Mon, 26 Oct 2026 10:09:17 +0200
-Subject: [PATCH 08/24] Modeling Algorithms - Close a fillet with a cap on the
+Subject: [PATCH 08/25] Modeling Algorithms - Close a fillet with a cap on the
  face at its end
 
 At a vertex with more than three edges, the end of a single fillet was
@@ -49,7 +49,7 @@ Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
  create mode 100644 tests/bugs/modalg_8/fillet_torus_capped_at_pocket_walls
 
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
-index 5c3d5db2c..b9acdf589 100644
+index 5c3d5db2..b9acdf58 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
 @@ -665,7 +665,10 @@ void ChFi3d_Builder::PerformFilletOnVertex(const int Index)
@@ -65,7 +65,7 @@ index 5c3d5db2c..b9acdf589 100644
          else
          {
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
-index ab5614b1a..acf56ca73 100644
+index ab5614b1..acf56ca7 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
 @@ -777,7 +777,23 @@ private:
@@ -94,7 +94,7 @@ index ab5614b1a..acf56ca73 100644
    Standard_EXPORT void IntersectMoreCorner(const int Index);
  
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
-index 2afbc1ab5..a364f0dda 100644
+index 2afbc1ab..a364f0dd 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
 @@ -285,6 +285,172 @@ static bool Update(const occ::handle<Adaptor3d_Surface>& fb,
@@ -774,7 +774,7 @@ index 2afbc1ab5..a364f0dda 100644
  {
  
 diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
-index b91ca96f2..383bd475a 100644
+index b91ca96f..383bd475 100644
 --- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 @@ -27,7 +27,11 @@
@@ -869,7 +869,7 @@ index b91ca96f2..383bd475a 100644
 +}
 diff --git a/tests/bugs/modalg_8/fillet_cap_on_cylinder_at_pocket_corner b/tests/bugs/modalg_8/fillet_cap_on_cylinder_at_pocket_corner
 new file mode 100644
-index 000000000..d1baade7b
+index 00000000..d1baade7
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_cap_on_cylinder_at_pocket_corner
 @@ -0,0 +1,19 @@
@@ -894,7 +894,7 @@ index 000000000..d1baade7b
 +checkprops result -v 36117.6 -deps 1.e-6 -s 11103.2
 diff --git a/tests/bugs/modalg_8/fillet_torus_capped_at_pocket_walls b/tests/bugs/modalg_8/fillet_torus_capped_at_pocket_walls
 new file mode 100644
-index 000000000..e51f09bab
+index 00000000..e51f09ba
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_torus_capped_at_pocket_walls
 @@ -0,0 +1,17 @@

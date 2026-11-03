@@ -1,7 +1,7 @@
-From c4d4353ee5d3fa8e6269338be1fe808bf8508a73 Mon Sep 17 00:00:00 2001
+From 70fa3dd91d2ab7102bb7bd57051b12a7f7a79120 Mon Sep 17 00:00:00 2001
 From: Kuzma30 <kuzemkoa@gmail.com>
 Date: Mon, 26 Oct 2026 10:09:17 +0200
-Subject: [PATCH 06/24] Modeling Algorithms - Reject a fillet end intersection
+Subject: [PATCH 06/25] Modeling Algorithms - Reject a fillet end intersection
  that does not join the section
 
 PerformIntersectionAtEnd intersects the end of the fillet with the faces
@@ -23,7 +23,7 @@ Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
  2 files changed, 109 insertions(+), 2 deletions(-)
 
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
-index 6e724a562..2afbc1ab5 100644
+index 6e724a56..2afbc1ab 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
 @@ -3178,8 +3178,19 @@ void ChFi3d_Builder::PerformIntersectionAtEnd(const int Index)
@@ -49,7 +49,7 @@ index 6e724a562..2afbc1ab5 100644
      //////////////////////////////////////////////////////////////////////
      // storage in the DS of the intersection curve
 diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
-index 0a48404ea..ebf0ae62d 100644
+index 0a48404e..ebf0ae62 100644
 --- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 @@ -972,3 +972,99 @@ TEST(BRepFilletAPI_MakeFilletTest, GrooveEndingOnCylinderSeam_SucceedsWithoutCra

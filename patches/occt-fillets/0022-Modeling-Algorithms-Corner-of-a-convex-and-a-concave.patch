@@ -1,7 +1,7 @@
-From b55c8580d4cee4ad73fe3da767fc8946f88643a0 Mon Sep 17 00:00:00 2001
+From 65317a6fe47b7b781f9c2f7f3c6d91f414269a80 Mon Sep 17 00:00:00 2001
 From: Kuzma30 <kuzemkoa@gmail.com>
 Date: Wed, 28 Oct 2026 14:33:26 +0200
-Subject: [PATCH 22/24] Modeling Algorithms - Corner of a convex and a concave
+Subject: [PATCH 22/25] Modeling Algorithms - Corner of a convex and a concave
  fillet at a vertex with smooth edges
 
 FreeCAD issue 20085, a cube of 20 with fillets of radius 6 and a square
@@ -54,7 +54,7 @@ Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
  create mode 100644 tests/bugs/modalg_8/fillet_rounded_cube_square_hole_convex_concave
 
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
-index 341ece731..96708f871 100644
+index 341ece73..96708f87 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
 @@ -1205,7 +1205,18 @@ void ChFi3d_Builder::PerformFilletOnVertex(const int Index)
@@ -77,7 +77,7 @@ index 341ece731..96708f871 100644
            if (!PerformTwoCornerMitre(Index))
            {
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
-index 31976c8e3..a57ae8803 100644
+index 31976c8e..a57ae880 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
 @@ -1243,6 +1243,77 @@ bool ChFi3d_IsInFront(TopOpeBRepDS_DataStructure&       DStr,
@@ -159,7 +159,7 @@ index 31976c8e3..a57ae8803 100644
                        const double ref,
                        const int    sens,
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
-index d41f2bfb1..4eb36c1ee 100644
+index d41f2bfb..4eb36c1e 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
 @@ -321,6 +321,21 @@ bool ChFi3d_IsInFront(TopOpeBRepDS_DataStructure&       DStr,
@@ -185,7 +185,7 @@ index d41f2bfb1..4eb36c1ee 100644
                           const occ::handle<Adaptor3d_Surface>& HSg,
                           occ::handle<Geom2d_Curve>&            Pcurv,
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx
-index f501e6bda..1533e7ede 100644
+index f501e6bd..1533e7ed 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx
 @@ -378,6 +378,20 @@ void ChFi3d_FilBuilder::PerformTwoCorner(const int Index)
@@ -264,7 +264,7 @@ index f501e6bda..1533e7ede 100644
            anOrTwin = TopAbs::Reverse(anOrTwin);
          }
 diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
-index b142fadd7..fbae6ec56 100644
+index b142fadd..fbae6ec5 100644
 --- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 @@ -1746,3 +1746,69 @@ TEST(BRepFilletAPI_MakeFilletTest, SquareHoleInRoundedCube_ConcaveEdgeEndsInTang
@@ -339,7 +339,7 @@ index b142fadd7..fbae6ec56 100644
 +}
 diff --git a/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_convex_concave b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_convex_concave
 new file mode 100644
-index 000000000..d9689d81c
+index 00000000..d9689d81
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_convex_concave
 @@ -0,0 +1,23 @@

@@ -1,7 +1,7 @@
-From a6f10140ff34a0196307691874f3c2b3a2e08696 Mon Sep 17 00:00:00 2001
+From 455dc39ab0775aac0868037d2dd844c8bd41627b Mon Sep 17 00:00:00 2001
 From: Kuzma30 <kuzemkoa@gmail.com>
 Date: Mon, 26 Oct 2026 10:09:17 +0200
-Subject: [PATCH 04/24] Modeling Algorithms - Fix fillet corners on the seam of
+Subject: [PATCH 04/25] Modeling Algorithms - Fix fillet corners on the seam of
  a periodic face
 
 PerformOneCorner extends the edge Arcprol across the opposite face Fop.
@@ -36,7 +36,7 @@ Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
  create mode 100644 tests/bugs/modalg_8/fillet_thread_on_seam
 
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
-index 2db55cb59..6e724a562 100644
+index 2db55cb5..6e724a56 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
 @@ -200,6 +200,9 @@ static bool Update(const occ::handle<Adaptor3d_Surface>& fb,
@@ -151,7 +151,7 @@ index 2db55cb59..6e724a562 100644
          int    imin     = 0;
          double dist2min = RealLast();
 diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
-index 8ff73561f..0a48404ea 100644
+index 8ff73561..0a48404e 100644
 --- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 @@ -928,3 +928,47 @@ TEST(BRepFilletAPI_MakeFilletTest, TaperedShaftFlushWithPlate_ProducesValidShape
@@ -204,7 +204,7 @@ index 8ff73561f..0a48404ea 100644
 +}
 diff --git a/tests/bugs/modalg_8/fillet_thread_on_seam b/tests/bugs/modalg_8/fillet_thread_on_seam
 new file mode 100644
-index 000000000..1294e44f4
+index 00000000..1294e44f
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_thread_on_seam
 @@ -0,0 +1,17 @@

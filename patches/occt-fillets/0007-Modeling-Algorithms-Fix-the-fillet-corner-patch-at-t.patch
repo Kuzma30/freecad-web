@@ -1,7 +1,7 @@
-From 96a7d78596efad1e31eec2a6a6b6a9e701489543 Mon Sep 17 00:00:00 2001
+From 31c49d7418524adb99b333d47214397362b7f0fa Mon Sep 17 00:00:00 2001
 From: Kuzma30 <kuzemkoa@gmail.com>
 Date: Mon, 26 Oct 2026 10:09:17 +0200
-Subject: [PATCH 07/24] Modeling Algorithms - Fix the fillet corner patch at
+Subject: [PATCH 07/25] Modeling Algorithms - Fix the fillet corner patch at
  the vertex of a sharp edge
 
 PerformMoreThreeCorner limits the sharp edges at the corner by a new point
@@ -34,7 +34,7 @@ Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
  2 files changed, 227 insertions(+), 46 deletions(-)
 
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_CnCrn.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_CnCrn.cxx
-index c02a50d08..922c86340 100644
+index c02a50d0..922c8634 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_CnCrn.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_CnCrn.cxx
 @@ -85,6 +85,7 @@
@@ -416,7 +416,7 @@ index c02a50d08..922c86340 100644
            // limitation of the alive edge
            TopAbs_Orientation ori;
 diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
-index ebf0ae62d..b91ca96f2 100644
+index ebf0ae62..b91ca96f 100644
 --- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 @@ -1068,3 +1068,78 @@ TEST(BRepFilletAPI_MakeFilletTest, PastShrinkingSupportFace_KeepsAddedVolume)

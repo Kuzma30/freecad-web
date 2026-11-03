@@ -186,7 +186,7 @@ apply_one freecad       freecad.patch
 apply_one pyside-setup  pyside-setup.patch \
   'sources/pyside6/cmake/Macros/PySideModules.cmake::--clang-option=--target=wasm64-unknown-emscripten'
 apply_one occt          occt.patch
-# The OCCT fillet series (FreeCAD forum, "Improving fillets in OCCT"; the 24 commits are in
+# The OCCT fillet series (FreeCAD forum, "Improving fillets in OCCT"; the 25 commits are in
 # occt-fillets/ for review), as one cumulative diff on top of occt.patch so that re-running
 # stays idempotent. Rebased onto the OCCT commit in patches/occt.version.
 apply_one occt          occt-fillets.patch

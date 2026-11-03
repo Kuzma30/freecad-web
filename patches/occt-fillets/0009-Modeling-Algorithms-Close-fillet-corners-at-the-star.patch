@@ -1,7 +1,7 @@
-From 534b2ac307b6f52dedda835dd1685748e723ee48 Mon Sep 17 00:00:00 2001
+From 73e6dcc6ccb816bc8c74d3d1e40bb5b64c41a59c Mon Sep 17 00:00:00 2001
 From: Kuzma30 <kuzemkoa@gmail.com>
 Date: Mon, 26 Oct 2026 10:09:17 +0200
-Subject: [PATCH 09/24] Modeling Algorithms - Close fillet corners at the start
+Subject: [PATCH 09/25] Modeling Algorithms - Close fillet corners at the start
  of a thread on a split cylinder
 
 At the start of a thread cut by a helix (FreeCAD issue 32486) a fillet may
@@ -52,7 +52,7 @@ Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
  create mode 100644 tests/bugs/modalg_8/fillet_thread_end_on_split_cylinder
 
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
-index b9acdf589..aaeb86d18 100644
+index b9acdf58..aaeb86d1 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
 @@ -17,6 +17,8 @@
@@ -217,7 +217,7 @@ index b9acdf589..aaeb86d18 100644
  }
  
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
-index af1688c68..2e4d07ec4 100644
+index af1688c6..2e4d07ec 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
 @@ -5920,6 +5920,21 @@ void ChFi3d_CoutureOnVertex(const TopoDS_Face&   F,
@@ -243,7 +243,7 @@ index af1688c68..2e4d07ec4 100644
        TopExp::Vertices(Ecur, Vf, Vl);
        if (Vf.IsSame(V) || Vl.IsSame(V))
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx
-index bf671a41b..405d59bb0 100644
+index bf671a41..405d59bb 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx
 @@ -36,6 +36,9 @@
@@ -431,7 +431,7 @@ index bf671a41b..405d59bb0 100644
        regdeb.SetS2(IFopsam, true);
 diff --git a/tests/bugs/modalg_8/fillet_thread_convex_concave_corner b/tests/bugs/modalg_8/fillet_thread_convex_concave_corner
 new file mode 100644
-index 000000000..97b429090
+index 00000000..97b42909
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_thread_convex_concave_corner
 @@ -0,0 +1,17 @@
@@ -454,7 +454,7 @@ index 000000000..97b429090
 +checkprops result -v 8681.03 -s 3081.65
 diff --git a/tests/bugs/modalg_8/fillet_thread_end_on_split_cylinder b/tests/bugs/modalg_8/fillet_thread_end_on_split_cylinder
 new file mode 100644
-index 000000000..a446b05c0
+index 00000000..a446b05c
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_thread_end_on_split_cylinder
 @@ -0,0 +1,18 @@

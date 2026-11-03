@@ -1,7 +1,7 @@
-From 4acc954666d54f7d101bc0b3d37474d67283c3fb Mon Sep 17 00:00:00 2001
+From a0dc3201891e3237eb71f9da7ef89b6d5414d212 Mon Sep 17 00:00:00 2001
 From: Kuzma30 <kuzemkoa@gmail.com>
 Date: Mon, 26 Oct 2026 10:09:17 +0200
-Subject: [PATCH 05/24] Modeling Algorithms - Cut a degenerated fillet
+Subject: [PATCH 05/25] Modeling Algorithms - Cut a degenerated fillet
  extension before approximation
 
 At a corner the spine is extended beyond its end, and the walking goes on
@@ -23,7 +23,7 @@ Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
  1 file changed, 143 insertions(+), 2 deletions(-)
 
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx
-index d0507d888..50b8fe6b9 100644
+index d0507d88..50b8fe6b 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx
 @@ -1505,6 +1505,91 @@ bool ChFi3d_FilBuilder::PerformFirstSection(const occ::handle<ChFiDS_Spine>&

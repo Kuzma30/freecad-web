@@ -1,7 +1,7 @@
-From 530e0aadde98ca846ff30b4ad5abafd278f42257 Mon Sep 17 00:00:00 2001
+From fcd2ca62e75e3e7f5d6c063aaff4d675488768d8 Mon Sep 17 00:00:00 2001
 From: Kuzma30 <kuzemkoa@gmail.com>
 Date: Mon, 26 Oct 2026 10:09:17 +0200
-Subject: [PATCH 13/24] Modeling Algorithms - Rebuild fillet pieces that break
+Subject: [PATCH 13/25] Modeling Algorithms - Rebuild fillet pieces that break
  the tangency of the trace
 
 On the FreeCAD screw of the previous commits, the fillet of the start wall
@@ -63,7 +63,7 @@ Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
  create mode 100644 tests/bugs/modalg_8/fillet_wall_profile_smooth_at_root
 
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
-index a97ca3f01..d0ffc5aa7 100644
+index a97ca3f0..d0ffc5aa 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
 @@ -45,6 +45,7 @@
@@ -677,7 +677,7 @@ index a97ca3f01..d0ffc5aa7 100644
          prevsd->ChangeVertexLastOnS1().SetPoint(cpd1.Point());
 diff --git a/tests/bugs/modalg_8/fillet_wall_profile_corner_at_root b/tests/bugs/modalg_8/fillet_wall_profile_corner_at_root
 new file mode 100644
-index 000000000..e4c05570f
+index 00000000..e4c05570
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_wall_profile_corner_at_root
 @@ -0,0 +1,19 @@
@@ -702,7 +702,7 @@ index 000000000..e4c05570f
 +checkprops result -v 8708.12 -s 3016.4
 diff --git a/tests/bugs/modalg_8/fillet_wall_profile_corner_sharp_end b/tests/bugs/modalg_8/fillet_wall_profile_corner_sharp_end
 new file mode 100644
-index 000000000..17952cb02
+index 00000000..17952cb0
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_wall_profile_corner_sharp_end
 @@ -0,0 +1,18 @@
@@ -726,7 +726,7 @@ index 000000000..17952cb02
 +checkprops result -v 8709.52 -s 3015.63
 diff --git a/tests/bugs/modalg_8/fillet_wall_profile_over_root b/tests/bugs/modalg_8/fillet_wall_profile_over_root
 new file mode 100644
-index 000000000..9cdf863c0
+index 00000000..9cdf863c
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_wall_profile_over_root
 @@ -0,0 +1,21 @@
@@ -753,7 +753,7 @@ index 000000000..9cdf863c0
 +checkprops result -v 8707.45 -s 3016.81
 diff --git a/tests/bugs/modalg_8/fillet_wall_profile_smooth_at_root b/tests/bugs/modalg_8/fillet_wall_profile_smooth_at_root
 new file mode 100644
-index 000000000..50330b531
+index 00000000..50330b53
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_wall_profile_smooth_at_root
 @@ -0,0 +1,19 @@

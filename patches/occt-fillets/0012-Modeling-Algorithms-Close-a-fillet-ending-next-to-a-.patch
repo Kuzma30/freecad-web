@@ -1,7 +1,7 @@
-From cb90f5d99b6b3f29c1d3a650489250581be6bcd1 Mon Sep 17 00:00:00 2001
+From ac74591d05e11b7a48743723134f15eff58502c9 Mon Sep 17 00:00:00 2001
 From: Kuzma30 <kuzemkoa@gmail.com>
 Date: Mon, 26 Oct 2026 10:09:17 +0200
-Subject: [PATCH 12/24] Modeling Algorithms - Close a fillet ending next to a
+Subject: [PATCH 12/25] Modeling Algorithms - Close a fillet ending next to a
  fillet of the same radius
 
 In the FreeCAD screw, the root of the thread starts at the bottom face next
@@ -82,7 +82,7 @@ Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
  create mode 100644 tests/bugs/modalg_8/fillet_wall_profile_cusp_ends
 
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
-index c77dbf20a..fff61e6f6 100644
+index c77dbf20..fff61e6f 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
 @@ -790,7 +790,8 @@ void ChFi3d_Builder::PerformFilletOnVertex(const int Index)
@@ -96,7 +96,7 @@ index c77dbf20a..fff61e6f6 100644
            return;
          }
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
-index d7008d6b3..2f67b2cec 100644
+index d7008d6b..2f67b2ce 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
 @@ -811,6 +811,25 @@ private:
@@ -126,7 +126,7 @@ index d7008d6b3..2f67b2cec 100644
  
    Standard_EXPORT void PerformMoreSurfdata(const int Index);
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
-index 2e4d07ec4..c5a44456e 100644
+index 2e4d07ec..c5a44456 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
 @@ -6089,3 +6089,26 @@ bool ChFi3d_IsSmooth(const occ::handle<Geom_Curve>& C)
@@ -157,7 +157,7 @@ index 2e4d07ec4..c5a44456e 100644
 +  return true;
 +}
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
-index e17ef189a..54a6476e1 100644
+index e17ef189..54a6476e 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
 @@ -558,4 +558,22 @@ occ::handle<Geom_BSplineCurve> ChFi3d_ApproxByC2(const occ::handle<Geom_Curve>&
@@ -184,7 +184,7 @@ index e17ef189a..54a6476e1 100644
 +
  #endif
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
-index 251be1579..a97ca3f01 100644
+index 251be157..a97ca3f0 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
 @@ -18,6 +18,9 @@
@@ -607,7 +607,7 @@ index 251be1579..a97ca3f01 100644
    // The initial state is restored
    if (!Guide.IsPeriodic())
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_6.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_6.cxx
-index 780ea21b5..fbff89d4d 100644
+index 780ea21b..fbff89d4 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_6.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_6.cxx
 @@ -186,7 +186,14 @@ static bool IsObst(const ChFiDS_CommonPoint& CP, const TopoDS_Vertex& Vref, cons
@@ -627,7 +627,7 @@ index 780ea21b5..fbff89d4d 100644
    int                                                    prof = 4;
    return !IsVois(E, Vref, VEMap, DONE, 0, prof);
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
-index 42ccdc710..07ae7d7b1 100644
+index 42ccdc71..07ae7d7b 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
 @@ -19,6 +19,10 @@
@@ -1721,7 +1721,7 @@ index 42ccdc710..07ae7d7b1 100644
  
 diff --git a/tests/bugs/modalg_8/fillet_root_mitre_at_wall_fillet b/tests/bugs/modalg_8/fillet_root_mitre_at_wall_fillet
 new file mode 100644
-index 000000000..e0b24b300
+index 00000000..e0b24b30
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_root_mitre_at_wall_fillet
 @@ -0,0 +1,18 @@
@@ -1745,7 +1745,7 @@ index 000000000..e0b24b300
 +checkprops result -v 8706.16 -s 3019.81
 diff --git a/tests/bugs/modalg_8/fillet_root_rolling_on_wall_fillet b/tests/bugs/modalg_8/fillet_root_rolling_on_wall_fillet
 new file mode 100644
-index 000000000..f8261e1f9
+index 00000000..f8261e1f
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_root_rolling_on_wall_fillet
 @@ -0,0 +1,19 @@
@@ -1770,7 +1770,7 @@ index 000000000..f8261e1f9
 +checkprops result -v 8691.48 -s 3034.92
 diff --git a/tests/bugs/modalg_8/fillet_root_small_radius_at_bottom b/tests/bugs/modalg_8/fillet_root_small_radius_at_bottom
 new file mode 100644
-index 000000000..941f05ff9
+index 00000000..941f05ff
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_root_small_radius_at_bottom
 @@ -0,0 +1,17 @@
@@ -1793,7 +1793,7 @@ index 000000000..941f05ff9
 +checkprops result -v 8677.5 -s 3067.65
 diff --git a/tests/bugs/modalg_8/fillet_wall_profile_cusp_ends b/tests/bugs/modalg_8/fillet_wall_profile_cusp_ends
 new file mode 100644
-index 000000000..3d658310a
+index 00000000..3d658310
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_wall_profile_cusp_ends
 @@ -0,0 +1,19 @@

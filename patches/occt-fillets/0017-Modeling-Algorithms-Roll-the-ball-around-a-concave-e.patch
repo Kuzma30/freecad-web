@@ -1,7 +1,7 @@
-From 831677c11af382aaa051f1843ceccba471e4e3f8 Mon Sep 17 00:00:00 2001
+From 3bc2d4b8d6f12fc9bdc25c1a06797c11b378891e Mon Sep 17 00:00:00 2001
 From: Kuzma30 <kuzemkoa@gmail.com>
 Date: Tue, 27 Oct 2026 14:46:28 +0200
-Subject: [PATCH 17/24] Modeling Algorithms - Roll the ball around a concave
+Subject: [PATCH 17/25] Modeling Algorithms - Roll the ball around a concave
  edge at a fillet corner
 
 FreeCAD issue 20085: a cube with fillets of radius 6 on all edges and a
@@ -57,7 +57,7 @@ Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
  create mode 100644 tests/bugs/modalg_8/fillet_rounded_cube_square_hole
 
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
-index 8815a650c..7b1f3ebfc 100644
+index 8815a650..7b1f3ebf 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
 @@ -911,6 +911,10 @@ void ChFi3d_Builder::PerformFilletOnVertex(const int Index)
@@ -72,7 +72,7 @@ index 8815a650c..7b1f3ebfc 100644
          {
            if (!PerformTwoCornerMitre(Index))
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
-index 0c66f1281..e639f3c67 100644
+index 0c66f128..e639f3c6 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
 @@ -203,6 +203,16 @@ public:
@@ -93,7 +93,7 @@ index 0c66f1281..e639f3c67 100644
    Standard_EXPORT ChFi3d_Builder(const TopoDS_Shape& S, const double Ta);
  
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
-index 67274d18f..31976c8e3 100644
+index 67274d18..31976c8e 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
 @@ -903,6 +903,29 @@ occ::handle<Geom_BezierCurve> ChFi3d_Spine(const gp_Pnt& pd,
@@ -194,7 +194,7 @@ index 67274d18f..31976c8e3 100644
          aFI1 = aDat1->InterferenceOnS2();
          aFI2 = aDat2->InterferenceOnS2();
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
-index 07ae7d7b1..1d2205734 100644
+index 07ae7d7b..1d220573 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
 @@ -17,6 +17,7 @@
@@ -249,7 +249,7 @@ index 07ae7d7b1..1d2205734 100644
      if (isCrossed)
      {
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C2.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C2.cxx
-index 52e6228c9..d695012e1 100644
+index 52e6228c..d695012e 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C2.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C2.cxx
 @@ -15,6 +15,21 @@
@@ -748,7 +748,7 @@ index 52e6228c9..d695012e1 100644
 +  return true;
 +}
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx
-index 405d59bb0..f501e6bda 100644
+index 405d59bb..f501e6bd 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder_C2.cxx
 @@ -584,6 +584,13 @@ void ChFi3d_FilBuilder::PerformTwoCorner(const int Index)
@@ -766,7 +766,7 @@ index 405d59bb0..f501e6bda 100644
          if (sameparam)
          {
 diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
-index 927f4769f..0e9cf901b 100644
+index 927f4769..0e9cf901 100644
 --- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 @@ -1320,3 +1320,78 @@ TEST(BRepFilletAPI_MakeFilletTest, ConstantRadius_FollowsRollingBall)
@@ -850,7 +850,7 @@ index 927f4769f..0e9cf901b 100644
 +}
 diff --git a/tests/bugs/modalg_8/fillet_rounded_cube_square_hole b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole
 new file mode 100644
-index 000000000..552c4427a
+index 00000000..552c4427
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole
 @@ -0,0 +1,31 @@

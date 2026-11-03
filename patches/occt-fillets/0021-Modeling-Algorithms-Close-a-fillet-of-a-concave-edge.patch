@@ -1,7 +1,7 @@
-From c4486c03c7ddf73a45ba698f34bdd21a09cf08c6 Mon Sep 17 00:00:00 2001
+From e97b99dcfd0e217c40f106397d397c55a14ccce9 Mon Sep 17 00:00:00 2001
 From: Kuzma30 <kuzemkoa@gmail.com>
 Date: Wed, 28 Oct 2026 11:10:53 +0200
-Subject: [PATCH 21/24] Modeling Algorithms - Close a fillet of a concave edge
+Subject: [PATCH 21/25] Modeling Algorithms - Close a fillet of a concave edge
  in the tangent plane at its end
 
 FreeCAD issue 20085, a cube of 20 with fillets of radius 6 and a square
@@ -48,7 +48,7 @@ Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
  create mode 100644 tests/bugs/modalg_8/fillet_rounded_cube_square_hole_concave_edge
 
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
-index 303e978b4..341ece731 100644
+index 303e978b..341ece73 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
 @@ -1170,7 +1170,8 @@ void ChFi3d_Builder::PerformFilletOnVertex(const int Index)
@@ -62,7 +62,7 @@ index 303e978b4..341ece731 100644
            return;
          }
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
-index 171729d01..dba82e83a 100644
+index 171729d0..dba82e83 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
 @@ -830,17 +830,30 @@ private:
@@ -101,7 +101,7 @@ index 171729d01..dba82e83a 100644
    //! Closes the end of a single fillet whose last surfdata was computed on
    //! the tangent plane of a support it had left, when the faces beyond the
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
-index f1c6e4660..d56dd783a 100644
+index f1c6e466..d56dd783 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
 @@ -2425,7 +2425,7 @@ bool ChFi3d_Builder::PerformCapInSectionPlane(const int theIndex)
@@ -491,7 +491,7 @@ index f1c6e4660..d56dd783a 100644
    aCPVs.SetPoint(aPVs);
    aCPVs.SetVertex(theVs);
 diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
-index 9eb1ebeb5..b142fadd7 100644
+index 9eb1ebeb..b142fadd 100644
 --- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 @@ -1671,3 +1671,78 @@ TEST(BRepFilletAPI_MakeFilletTest, SquareHoleInRoundedCube_AllEdgesCornersAlike)
@@ -575,7 +575,7 @@ index 9eb1ebeb5..b142fadd7 100644
 +}
 diff --git a/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_concave_edge b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_concave_edge
 new file mode 100644
-index 000000000..8288a45f8
+index 00000000..8288a45f
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_concave_edge
 @@ -0,0 +1,27 @@

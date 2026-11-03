@@ -1,7 +1,7 @@
-From fb80c9160abc50cd1716d47c364bcbd3b24907da Mon Sep 17 00:00:00 2001
+From 31b69e9625332e47048e1674b8aa8c68a26f21fd Mon Sep 17 00:00:00 2001
 From: Kuzma30 <kuzemkoa@gmail.com>
 Date: Tue, 27 Oct 2026 15:14:15 +0200
-Subject: [PATCH 18/24] Modeling Algorithms - Close a fillet ending in the
+Subject: [PATCH 18/25] Modeling Algorithms - Close a fillet ending in the
  plane of the next face
 
 FreeCAD issue 20085, continued: in the cube with fillets of radius 6 and
@@ -45,7 +45,7 @@ Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
  create mode 100644 tests/bugs/modalg_8/fillet_rounded_cube_square_hole_ends
 
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
-index 1d2205734..674a10541 100644
+index 1d220573..674a1054 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
 @@ -5207,6 +5207,18 @@ void ChFi3d_Builder::PerformIntersectionAtEnd(const int Index)
@@ -101,7 +101,7 @@ index 1d2205734..674a10541 100644
            gp_Pnt2d                      P2d = BRep_Tool::Parameters(Vtx, Face[0]);
            Geom2dAPI_ProjectPointOnCurve Projector(P2d, C2dint1);
 diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
-index 0e9cf901b..fd59dfcf1 100644
+index 0e9cf901..fd59dfcf 100644
 --- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 @@ -1395,3 +1395,81 @@ TEST(BRepFilletAPI_MakeFilletTest, SquareHoleInRoundedCube_RollsBallAroundHoleEd
@@ -188,7 +188,7 @@ index 0e9cf901b..fd59dfcf1 100644
 +}
 diff --git a/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_ends b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_ends
 new file mode 100644
-index 000000000..3dc500712
+index 00000000..3dc50071
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_ends
 @@ -0,0 +1,38 @@

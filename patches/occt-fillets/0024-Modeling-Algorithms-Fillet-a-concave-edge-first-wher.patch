@@ -1,7 +1,7 @@
-From 16cc926548b2740d031733a1e92325112ca10fba Mon Sep 17 00:00:00 2001
+From 06f841f3d5bc60a70dd235749bb280905865cce5 Mon Sep 17 00:00:00 2001
 From: Kuzma30 <kuzemkoa@gmail.com>
 Date: Wed, 28 Oct 2026 15:28:35 +0200
-Subject: [PATCH 24/24] Modeling Algorithms - Fillet a concave edge first where
+Subject: [PATCH 24/25] Modeling Algorithms - Fillet a concave edge first where
  it meets two convex fillets
 
 FreeCAD issue 20085 (cube 20 with fillets of radius 6 and a square hole 8 x 8
@@ -61,7 +61,7 @@ Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
  create mode 100644 tests/bugs/modalg_8/fillet_rounded_cube_square_hole_three_fillets_corner
 
 diff --git a/src/ModelingAlgorithms/TKFillet/BRepFilletAPI/BRepFilletAPI_MakeFillet.cxx b/src/ModelingAlgorithms/TKFillet/BRepFilletAPI/BRepFilletAPI_MakeFillet.cxx
-index f192eb5fa..335bfb09b 100644
+index f192eb5f..335bfb09 100644
 --- a/src/ModelingAlgorithms/TKFillet/BRepFilletAPI/BRepFilletAPI_MakeFillet.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/BRepFilletAPI/BRepFilletAPI_MakeFillet.cxx
 @@ -15,6 +15,16 @@
@@ -641,7 +641,7 @@ index f192eb5fa..335bfb09b 100644
             || myBuilder.Builder()->IsSplit(F, TopAbs_IN)
             || myBuilder.Builder()->IsSplit(F, TopAbs_ON));
 diff --git a/src/ModelingAlgorithms/TKFillet/BRepFilletAPI/BRepFilletAPI_MakeFillet.hxx b/src/ModelingAlgorithms/TKFillet/BRepFilletAPI/BRepFilletAPI_MakeFillet.hxx
-index c44880d8b..8b7b13b56 100644
+index c44880d8..8b7b13b5 100644
 --- a/src/ModelingAlgorithms/TKFillet/BRepFilletAPI/BRepFilletAPI_MakeFillet.hxx
 +++ b/src/ModelingAlgorithms/TKFillet/BRepFilletAPI/BRepFilletAPI_MakeFillet.hxx
 @@ -36,6 +36,7 @@
@@ -696,7 +696,7 @@ index c44880d8b..8b7b13b56 100644
  
  #endif // _BRepFilletAPI_MakeFillet_HeaderFile
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
-index 7ae693505..9555acca0 100644
+index 7ae69350..9555acca 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C1.cxx
 @@ -2889,6 +2889,11 @@ bool ChFi3d_Builder::CapInSectionPlane(const int            theIndex,
@@ -712,7 +712,7 @@ index 7ae693505..9555acca0 100644
    return true;
  }
 diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
-index ef8d253b4..c4847b50d 100644
+index ef8d253b..c4847b50 100644
 --- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 @@ -1632,10 +1632,12 @@ TEST(BRepFilletAPI_MakeFilletTest, SquareHoleInRoundedCube_SecondFilletNextToFir
@@ -910,7 +910,7 @@ index ef8d253b4..c4847b50d 100644
 +  }
 +}
 diff --git a/tests/bugs/modalg_8/fillet_rounded_cube_all_edges_symmetric b/tests/bugs/modalg_8/fillet_rounded_cube_all_edges_symmetric
-index 90c974410..62d1fe080 100644
+index 90c97441..62d1fe08 100644
 --- a/tests/bugs/modalg_8/fillet_rounded_cube_all_edges_symmetric
 +++ b/tests/bugs/modalg_8/fillet_rounded_cube_all_edges_symmetric
 @@ -6,10 +6,12 @@ puts ""
@@ -942,7 +942,7 @@ index 90c974410..62d1fe080 100644
  # The result is symmetric with respect to the axis of the hole.
  regexp {X += +([-0-9.e+]+)\s+Y += +([-0-9.e+]+)} [vprops result] full aX aY
 diff --git a/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_concave_edge b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_concave_edge
-index 8288a45f8..eb32ae698 100644
+index 8288a45f..eb32ae69 100644
 --- a/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_concave_edge
 +++ b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_concave_edge
 @@ -20,8 +20,9 @@ checkmaxtol result -ref 1.e-4
@@ -959,7 +959,7 @@ index 8288a45f8..eb32ae698 100644
 +checkmaxtol result2 -ref 1.e-4
 +checkprops result2 -v 5154.84
 diff --git a/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_rim_after_corner b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_rim_after_corner
-index 3d7322fb2..58c92dbdd 100644
+index 3d7322fb..58c92dbd 100644
 --- a/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_rim_after_corner
 +++ b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_rim_after_corner
 @@ -14,7 +14,7 @@ puts ""
@@ -983,7 +983,7 @@ index 3d7322fb2..58c92dbdd 100644
  }
 diff --git a/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_three_fillets_corner b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_three_fillets_corner
 new file mode 100644
-index 000000000..f54e568c9
+index 00000000..f54e568c
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_rounded_cube_square_hole_three_fillets_corner
 @@ -0,0 +1,41 @@

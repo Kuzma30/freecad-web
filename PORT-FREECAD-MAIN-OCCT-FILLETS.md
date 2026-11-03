@@ -8,7 +8,7 @@ This branch moves the port from **FreeCAD 1.1.3 + OCCT 7.8.1** to:
 |---|---|---|
 | FreeCAD | tag 1.1.3 | main, commit `66644dee63d3d260f1e0b9a8517d1a13631e903f` (2026-11-01), `patches/freecad.version` |
 | OCCT | tag V7_8_1 | master, commit `3d097a0328e71b826377d4814ab05ec3c3d23871` (8.1.0.dev), `patches/occt.version` |
-| OCCT patches | `occt.patch` | `occt.patch` (rebased) + `occt-fillets.patch` (24 commits, also in `occt-fillets/`) |
+| OCCT patches | `occt.patch` | `occt.patch` (rebased) + `occt-fillets.patch` (25 commits, also in `occt-fillets/`) |
 | AddonManager | `937b687` | `745c1b1` (the commit FreeCAD main points at) |
 | OndselSolver | `main` branch tarball | `4be80ee` (the commit FreeCAD main points at) |
 | RapidJSON | not used | `24b5e7a` (header-only), OCCT 8 builds TKDEGLTF only with it |

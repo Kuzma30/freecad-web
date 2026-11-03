@@ -1,7 +1,7 @@
-From 407529a26dd1ba7b385cf0d46cf7a7f5e82b87fd Mon Sep 17 00:00:00 2001
+From 786c5caeb19bdf1c45d401ff79977cca05ad3374 Mon Sep 17 00:00:00 2001
 From: Kuzma30 <kuzemkoa@gmail.com>
 Date: Mon, 26 Oct 2026 15:21:44 +0200
-Subject: [PATCH 16/24] Modeling Algorithms - Build a still rolling ball as a
+Subject: [PATCH 16/25] Modeling Algorithms - Build a still rolling ball as a
  sphere
 
 A ball of the radius of a concave fillet it rolls into (the start wall of
@@ -54,7 +54,7 @@ Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
  create mode 100644 tests/bugs/modalg_8/fillet_wall_profile_sphere_at_root
 
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
-index c5a44456e..67274d18f 100644
+index c5a44456..67274d18 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
 @@ -56,6 +56,13 @@
@@ -218,7 +218,7 @@ index c5a44456e..67274d18f 100644
 +  return true;
 +}
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
-index 54a6476e1..d41f2bfb1 100644
+index 54a6476e..d41f2bfb 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
 @@ -576,4 +576,38 @@ bool ChFi3d_OrientAsNeighbour(const occ::handle<Geom_Surface>& theS,
@@ -261,7 +261,7 @@ index 54a6476e1..d41f2bfb1 100644
 +
  #endif
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
-index d0ffc5aa7..e4145c359 100644
+index d0ffc5aa..e4145c35 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
 @@ -32,6 +32,7 @@
@@ -475,7 +475,7 @@ index d0ffc5aa7..e4145c359 100644
        }
        // The filling is oriented as the surfdata before it.
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx
-index b74d8968e..0f928049b 100644
+index b74d8968..0f928049 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_FilBuilder.cxx
 @@ -20,6 +20,8 @@
@@ -696,7 +696,7 @@ index b74d8968e..0f928049b 100644
        throw Standard_Failure("PerformSurf : Failed approximation!");
 diff --git a/tests/bugs/modalg_8/fillet_wall_profile_ball_does_not_pass_root b/tests/bugs/modalg_8/fillet_wall_profile_ball_does_not_pass_root
 new file mode 100644
-index 000000000..83cd7439d
+index 00000000..83cd7439
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_wall_profile_ball_does_not_pass_root
 @@ -0,0 +1,19 @@
@@ -720,7 +720,7 @@ index 000000000..83cd7439d
 +checkmaxtol result -ref 2.76e-4
 +checkprops result -v 8688.22 -s 2995.41
 diff --git a/tests/bugs/modalg_8/fillet_wall_profile_over_root b/tests/bugs/modalg_8/fillet_wall_profile_over_root
-index a330c0e10..300afdb8a 100644
+index a330c0e1..300afdb8 100644
 --- a/tests/bugs/modalg_8/fillet_wall_profile_over_root
 +++ b/tests/bugs/modalg_8/fillet_wall_profile_over_root
 @@ -7,9 +7,11 @@ puts ""
@@ -740,7 +740,7 @@ index a330c0e10..300afdb8a 100644
  explode b E
 diff --git a/tests/bugs/modalg_8/fillet_wall_profile_sphere_at_root b/tests/bugs/modalg_8/fillet_wall_profile_sphere_at_root
 new file mode 100644
-index 000000000..72ee9fec2
+index 00000000..72ee9fec
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_wall_profile_sphere_at_root
 @@ -0,0 +1,36 @@

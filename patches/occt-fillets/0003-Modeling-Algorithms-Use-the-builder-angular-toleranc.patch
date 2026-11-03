@@ -1,7 +1,7 @@
-From 0f81d9bf61b3822e36bf7e562ae9797ec5417239 Mon Sep 17 00:00:00 2001
+From f138d1634d631993dccd93b4f0724dc27ccf96f6 Mon Sep 17 00:00:00 2001
 From: Kuzma30 <kuzemkoa@gmail.com>
 Date: Mon, 26 Oct 2026 10:09:17 +0200
-Subject: [PATCH 03/24] Modeling Algorithms - Use the builder angular tolerance
+Subject: [PATCH 03/25] Modeling Algorithms - Use the builder angular tolerance
  to count sharp edges at a corner
 
 At the end of a fillet, ChFi3d_NumberOfSharpEdges() decides how the corner
@@ -34,7 +34,7 @@ Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
  6 files changed, 97 insertions(+), 10 deletions(-)
 
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d.cxx
-index e76af2939..01ad72849 100644
+index e76af293..01ad7284 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d.cxx
 @@ -160,7 +160,8 @@ ChFiDS_TypeOfConcavity ChFi3d::DefineConnectType(const TopoDS_Edge& E,
@@ -57,7 +57,7 @@ index e76af2939..01ad72849 100644
      {
        if (theOrder == GeomAbs_C2 && aCont.StatusError() == LocalAnalysis_NullSecondDerivative)
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d.hxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d.hxx
-index cb156fb7a..1fe2ac574 100644
+index cb156fb7..1fe2ac57 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d.hxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d.hxx
 @@ -43,10 +43,13 @@ public:
@@ -76,7 +76,7 @@ index cb156fb7a..1fe2ac574 100644
    //! Returns Reversed in Or1 and(or) Or2 if
    //! the concave edge defined by the interior of faces F1 and F2,
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
-index fd5405979..5c3d5db2c 100644
+index fd540597..5c3d5db2 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
 @@ -133,7 +133,7 @@ void ChFi3d_Builder::ExtentAnalyse()
@@ -98,7 +98,7 @@ index fd5405979..5c3d5db2c 100644
    if (nondegenere)
    { // Normal processing
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
-index 5a3be39b0..af1688c68 100644
+index 5a3be39b..af1688c6 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.cxx
 @@ -5764,7 +5764,10 @@ int ChFi3d_NbNotDegeneratedEdges(const TopoDS_Vertex& Vtx, const ChFiDS_Map& VEM
@@ -139,7 +139,7 @@ index 5a3be39b0..af1688c68 100644
    if (bordlibre)
    {
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
-index c07d9b054..e17ef189a 100644
+index c07d9b05..e17ef189 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
 @@ -528,6 +528,8 @@ void ChFi3d_ChercheBordsLibres(const ChFiDS_Map&    myVEMap,
@@ -162,7 +162,7 @@ index c07d9b054..e17ef189a 100644
  void ChFi3d_cherche_vertex(const TopoDS_Edge& E1,
                             const TopoDS_Edge& E2,
 diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
-index b62bc5f12..8ff73561f 100644
+index b62bc5f1..8ff73561 100644
 --- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 @@ -20,6 +20,8 @@

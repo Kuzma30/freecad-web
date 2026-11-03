@@ -77,7 +77,7 @@ permissions:
 
 env:
   # Bump to invalidate the cache deliberately (a version change here should force a rebuild).
-  DEPS_KEY: v2-wasm64-emsdk6.0.9-xerces3.2.5-occt8.1-3d097a03-fillets24-vtk9.3.1-coin4.0.3-boost1.86
+  DEPS_KEY: v2-wasm64-emsdk6.0.9-xerces3.2.5-occt8.1-3d097a03-fillets25-vtk9.3.1-coin4.0.3-boost1.86
 
 jobs:
   deps:

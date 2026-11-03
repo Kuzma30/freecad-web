@@ -1,7 +1,7 @@
-From 4dac1d9358a6d61706c2e31dae9e5e1f1e9750f5 Mon Sep 17 00:00:00 2001
+From 074e2f25f53d4e81f8e177b785b85a752fef4913 Mon Sep 17 00:00:00 2001
 From: Kuzma30 <kuzemkoa@gmail.com>
 Date: Mon, 26 Oct 2026 10:09:17 +0200
-Subject: [PATCH 10/24] Modeling Algorithms - Cut two fillets along their
+Subject: [PATCH 10/25] Modeling Algorithms - Cut two fillets along their
  intersection at a corner
 
 Two fillets ending at a vertex with more than three sharp edges were always
@@ -32,7 +32,7 @@ Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
  create mode 100644 tests/bugs/modalg_8/fillet_mitre_at_pocket_corner
 
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
-index aaeb86d18..811c76c18 100644
+index aaeb86d1..811c76c1 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.cxx
 @@ -813,7 +813,10 @@ void ChFi3d_Builder::PerformFilletOnVertex(const int Index)
@@ -48,7 +48,7 @@ index aaeb86d18..811c76c18 100644
          else
          {
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
-index acf56ca73..92b8e6c4b 100644
+index acf56ca7..92b8e6c4 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder.hxx
 @@ -195,6 +195,14 @@ public:
@@ -67,7 +67,7 @@ index acf56ca73..92b8e6c4b 100644
    Standard_EXPORT ChFi3d_Builder(const TopoDS_Shape& S, const double Ta);
  
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C2.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C2.cxx
-index 4b4b44745..52e6228c9 100644
+index 4b4b4474..52e6228c 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C2.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_C2.cxx
 @@ -38,6 +38,18 @@
@@ -590,7 +590,7 @@ index 4b4b44745..52e6228c9 100644
 +}
 diff --git a/tests/bugs/modalg_8/fillet_mitre_at_pocket_corner b/tests/bugs/modalg_8/fillet_mitre_at_pocket_corner
 new file mode 100644
-index 000000000..6dfea2d2e
+index 00000000..6dfea2d2
 --- /dev/null
 +++ b/tests/bugs/modalg_8/fillet_mitre_at_pocket_corner
 @@ -0,0 +1,20 @@

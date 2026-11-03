@@ -1,7 +1,7 @@
-From 7c06e177b1b562cb1c99741d9c95ab93eaf415df Mon Sep 17 00:00:00 2001
+From f8c0cb46429966e240a8c2f52e3ad45ccdad6ca3 Mon Sep 17 00:00:00 2001
 From: Kuzma30 <kuzemkoa@gmail.com>
 Date: Mon, 26 Oct 2026 10:09:17 +0200
-Subject: [PATCH 01/24] Modeling Algorithms - Do not report a fillet obstacle
+Subject: [PATCH 01/25] Modeling Algorithms - Do not report a fillet obstacle
  without its curve
 
 When the fillet walking reaches a face boundary, ChFi3d_Builder::StartSol
@@ -29,7 +29,7 @@ Claude-Session: https://claude.ai/code/session_01N85duF92anuCHYJzUxLgPg
  3 files changed, 56 insertions(+), 3 deletions(-)
 
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
-index 49848b5f5..c07d9b054 100644
+index 49848b5f..c07d9b05 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_0.hxx
 @@ -528,6 +528,11 @@ void ChFi3d_ChercheBordsLibres(const ChFiDS_Map&    myVEMap,
@@ -45,7 +45,7 @@ index 49848b5f5..c07d9b054 100644
                                const ChFiDS_Map&    VEMap,
                                const ChFiDS_Map&    EFmap);
 diff --git a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
-index 9a6c5801a..4d553d4bc 100644
+index 9a6c5801..4d553d4b 100644
 --- a/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/ChFi3d/ChFi3d_Builder_2.cxx
 @@ -1526,8 +1526,7 @@ bool ChFi3d_Builder::StartSol(
@@ -78,7 +78,7 @@ index 9a6c5801a..4d553d4bc 100644
            return false;
          }
 diff --git a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
-index fc663e3cd..aed8e00bd 100644
+index fc663e3c..aed8e00b 100644
 --- a/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 +++ b/src/ModelingAlgorithms/TKFillet/GTests/BRepFilletAPI_MakeFillet_Test.cxx
 @@ -766,3 +766,49 @@ TEST(BRepFilletAPI_MakeFilletTest, OCC426_RevolveFuseUnifyFillet)
