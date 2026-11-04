@@ -49,8 +49,8 @@ on:
       runner:
         description: "Where to build"
         type: choice
-        options: [vps, hosted]
-        default: vps
+        options: [builder, vps, hosted]
+        default: builder
       targets:
         description: "ninja targets (blank = the default focused set)"
         type: string
@@ -73,7 +73,7 @@ env:
 jobs:
   freecad:
     timeout-minutes: 360
-    # Default to the VPS, and phrase it so a push event -- where `inputs` is empty --
+    # Default to the build box, and phrase it so a push event -- where `inputs` is empty --
     # still lands there. The other way round, run 32231308018 was handed
     # labels=[ubuntu-latest], never got a runner, and failed in four seconds with no
     # steps and no message.
