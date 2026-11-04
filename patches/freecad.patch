@@ -2029,10 +2029,28 @@ index 06c01e13..7549c6be 100644
  
  void InputField::newInput(const QString& text)
 diff --git a/src/Gui/MainWindow.cpp b/src/Gui/MainWindow.cpp
-index dfb88378..2781d86f 100644
+index dfb88378..7267d238 100644
 --- a/src/Gui/MainWindow.cpp
 +++ b/src/Gui/MainWindow.cpp
-@@ -2277,6 +2277,13 @@ void MainWindow::saveWindowSettings(bool canDelay)
+@@ -586,9 +586,17 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags f)
+     connect(statusBar(), &QWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+         const QPoint globalPos = statusBar()->mapToGlobal(pos);
+         QTimer::singleShot(0, this, [this, globalPos]() {
++#if defined(__EMSCRIPTEN__)
++            // exec() spins a nested event loop, which deadlocks Qt for WebAssembly.
++            auto* menu = new QMenu(statusBar());
++            menu->setAttribute(Qt::WA_DeleteOnClose);
++            buildStatusBarContextMenu(*menu);
++            menu->popup(globalPos);
++#else
+             QMenu menu(statusBar());
+             buildStatusBarContextMenu(menu);
+             menu.exec(globalPos);
++#endif
+         });
+     });
+ 
+@@ -2277,6 +2285,13 @@ void MainWindow::saveWindowSettings(bool canDelay)
  
  void MainWindow::startSplasher()
  {
@@ -2441,7 +2459,7 @@ index fe9ca4e2..87f1f048 100644
          }
      }
 diff --git a/src/Gui/PythonConsole.cpp b/src/Gui/PythonConsole.cpp
-index 459f9a1e..25159dae 100644
+index 459f9a1e..89111114 100644
 --- a/src/Gui/PythonConsole.cpp
 +++ b/src/Gui/PythonConsole.cpp
 @@ -1327,57 +1327,74 @@ void PythonConsole::overrideCursor(const QString& txt)
@@ -2494,7 +2512,8 @@ index 459f9a1e..25159dae 100644
      a->setEnabled(!document()->isEmpty());
  
      clearAction->setEnabled(!document()->isEmpty());
-     menu.addAction(clearAction);
+-    menu.addAction(clearAction);
++    menu->addAction(clearAction);
  
 -    menu.addSeparator();
 -    menu.addAction(tr("Insert File Name…"), this, &PythonConsole::onInsertFileName);
@@ -3767,7 +3786,7 @@ index 14750452..ab6412b4 100644
          pcModeSwitch->whichChild = _iActualMode;
      }
 diff --git a/src/Gui/propertyeditor/PropertyEditor.cpp b/src/Gui/propertyeditor/PropertyEditor.cpp
-index 1188163b..8da8221b 100644
+index 1188163b..39b3c470 100644
 --- a/src/Gui/propertyeditor/PropertyEditor.cpp
 +++ b/src/Gui/propertyeditor/PropertyEditor.cpp
 @@ -1072,8 +1072,11 @@ void PropertyEditor::reportPropUses(App::Property* prop) const
@@ -3888,7 +3907,7 @@ index 1188163b..8da8221b 100644
  
          QAction* action;
          QString text;
-@@ -1218,242 +1221,253 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
+@@ -1218,242 +1221,255 @@ void PropertyEditor::contextMenuEvent(QContextMenuEvent*)
          _ACTION_SETUP(EvalOnRestore);
          _ACTION_SETUP(CopyOnChange);
  
@@ -4325,7 +4344,9 @@ index 1188163b..8da8221b 100644
 +                    break;
 +                }
 +                QList<App::SubObjectT> subObjects = dlg.currentSubObjects();
-+                moveProperties(props, subObjects);
++                // props is a by-copy capture of the menu handler, so const here
++                auto movedProps = props;
++                moveProperties(movedProps, subObjects);
 +                break;
 +            }
 +            default:
@@ -6525,28 +6546,6 @@ index 175342ab..92813dfe 100644
  
  ViewProviderDatum::ViewProviderDatum()
  {
-diff --git a/src/Mod/Sketcher/App/GeoEnum.h b/src/Mod/Sketcher/App/GeoEnum.h
-index b077a34b..7198cc7d 100644
---- a/src/Mod/Sketcher/App/GeoEnum.h
-+++ b/src/Mod/Sketcher/App/GeoEnum.h
-@@ -188,4 +188,17 @@ constexpr const GeoElementId GeoElementId::HAxis = GeoElementId(GeoEnum::HAxis,
- constexpr const GeoElementId GeoElementId::VAxis = GeoElementId(GeoEnum::VAxis, PointPos::none);
- #endif
- 
-+// FCWEB: a free operator< with the ordering the std::less specialisation below has always
-+// had. libc++ from LLVM 20 on rewrites std::map's std::less<Key> into std::less<void> on
-+// its emplace and find paths, so the specialisation is bypassed there and `lhs < rhs` has
-+// to compile on its own:
-+//     lazy_synth_three_way_comparator.h:45: no matching function for call to object of
-+//     type 'const std::less<void>'
-+// The specialisation now delegates to this, so there is one definition of the order.
-+inline bool operator<(const GeoElementId& lhs, const GeoElementId& rhs)
-+{
-+    return (lhs.GeoId != rhs.GeoId) ? (lhs.GeoId < rhs.GeoId)
-+                                    : (static_cast<int>(lhs.Pos) < static_cast<int>(rhs.Pos));
-+}
-+
- }  // namespace Sketcher
 diff --git a/src/Mod/Sketcher/App/planegcs/GCS.cpp b/src/Mod/Sketcher/App/planegcs/GCS.cpp
 index e6327c66..94f9a247 100644
 --- a/src/Mod/Sketcher/App/planegcs/GCS.cpp
@@ -6600,31 +6599,6 @@ index 76281bf2..f71aaa2d 100644
  Base::Color Vcolor = Base::Color(static_cast<uint32_t>(VColorLong));
  }  // namespace
  SbColor DrawingParameters::CrossColorH(Hcolor.r, Hcolor.g, Hcolor.b);
-diff --git a/src/Mod/Sketcher/Gui/EditModeCoinManagerParameters.h b/src/Mod/Sketcher/Gui/EditModeCoinManagerParameters.h
-index bd390e95..abe3535e 100644
---- a/src/Mod/Sketcher/Gui/EditModeCoinManagerParameters.h
-+++ b/src/Mod/Sketcher/Gui/EditModeCoinManagerParameters.h
-@@ -256,6 +256,20 @@ public:
- };
- 
- 
-+// FCWEB: a free operator< with the ordering the std::less specialisation below has always
-+// had. libc++ from LLVM 20 on rewrites std::map's std::less<Key> into std::less<void> on
-+// its emplace and find paths, so the specialisation is bypassed there and `lhs < rhs` has
-+// to compile on its own:
-+//     lazy_synth_three_way_comparator.h:45: no matching function for call to object of
-+//     type 'const std::less<void>'
-+// The specialisation now delegates to this, so there is one definition of the order.
-+inline bool operator<(const MultiFieldId& lhs, const MultiFieldId& rhs)
-+{
-+    return (lhs.layerId != rhs.layerId)
-+        ? (lhs.layerId < rhs.layerId)
-+        : (static_cast<int>(lhs.fieldIndex) < static_cast<int>(rhs.fieldIndex));
-+}
-+
- }  // namespace SketcherGui
- 
- 
 diff --git a/src/Mod/Start/App/CMakeLists.txt b/src/Mod/Start/App/CMakeLists.txt
 index 96513109..1c8159e5 100644
 --- a/src/Mod/Start/App/CMakeLists.txt
@@ -6887,3 +6861,41 @@ index abe7034d..3d962071 100644
  }
  
  }  // namespace Part
+diff --git a/src/Gui/GraphvizView.cpp b/src/Gui/GraphvizView.cpp
+index e07b6970..2af19139 100644
+--- a/src/Gui/GraphvizView.cpp
++++ b/src/Gui/GraphvizView.cpp
+@@ -180,12 +180,17 @@ GraphvizView::GraphvizView(App::Document& _doc, QWidget* parent)
+ 
+     dotProc = new QProcess(this);
+     unflattenProc = new QProcess(this);
++#if !defined(__EMSCRIPTEN__)
+     connect(dotProc, &QProcess::started, this, &GraphvizView::convertDotStarted);
+     connect(dotProc, &QProcess::errorOccurred, this, &GraphvizView::convertDotError);
+     connect(dotProc, &QProcess::finished, this, &GraphvizView::convertDotFinished);
+     connect(unflattenProc, &QProcess::started, this, &GraphvizView::convertUnflattenStarted);
+     connect(unflattenProc, &QProcess::errorOccurred, this, &GraphvizView::convertUnflattenError);
+     connect(unflattenProc, &QProcess::finished, this, &GraphvizView::convertUnflattenFinished);
++#else
++    // Qt for WebAssembly has no QProcess: the stub (qprocess_stub.h) has no signals
++    // and never starts dot, so there is nothing to connect.
++#endif
+ 
+     // NOLINTBEGIN
+     //  Connect signal from document
+diff --git a/src/Mod/CAM/App/CMakeLists.txt b/src/Mod/CAM/App/CMakeLists.txt
+index 94e6b0b0..3e62eb26 100644
+--- a/src/Mod/CAM/App/CMakeLists.txt
++++ b/src/Mod/CAM/App/CMakeLists.txt
+@@ -123,6 +123,11 @@ target_include_directories(
+     ${EIGEN3_INCLUDE_DIR}
+ )
+ target_link_libraries(Path ${Path_LIBS})
++# AreaPyImp.cpp includes pybind11; take its headers from the package found by
++# SetupPybind11 rather than relying on a system-wide install.
++if(TARGET pybind11::headers)
++    target_link_libraries(Path pybind11::headers)
++endif()
+ target_compile_warn_error(Path)
+ 
+ 
