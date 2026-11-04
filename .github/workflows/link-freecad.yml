@@ -493,6 +493,14 @@ jobs:
           python3 -m pip install --quiet --break-system-packages pybind11 "swig==$SWIG_PIN" 2>/dev/null \
             || python3 -m pip install --quiet pybind11 "swig==$SWIG_PIN"
           python3 -c 'import pybind11; print("  pybind11:", pybind11.get_cmake_dir())'
+          # FreeCAD main's configure requires the lark Python package in the HOST
+          # interpreter (cMake/FindLARK.cmake), and the BIM build runs it to generate the
+          # ArchSql parser. lark is pure Python, so one copy on PYTHONPATH serves both the
+          # setup-python interpreter and the cross-built CPython configure-gui-weh.sh uses.
+          # Pinned to the lark that stage-python-packages.sh ships.
+          python3 -m pip install --quiet --target "$GITHUB_WORKSPACE/deps/host/pylib" "lark==1.2.2"
+          echo "PYTHONPATH=$GITHUB_WORKSPACE/deps/host/pylib" >> "$GITHUB_ENV"
+          PYTHONPATH="$GITHUB_WORKSPACE/deps/host/pylib" python3 -c 'import lark; print("  lark:", lark.__version__)'
           swig -version | grep -i version | head -1 | sed 's/^/  swig: /'
           # Through emcc, not embuilder. embuilder builds ports with its own DEFAULT settings
           # and never reads EMCC_CFLAGS: single-threaded, and under the wasm64 toolchain
