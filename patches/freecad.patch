@@ -6830,3 +6830,60 @@ index 04c3d60..8a07279 100644
          request.setAttribute(
              QtNetwork.QNetworkRequest.RedirectPolicyAttribute,
              QtNetwork.QNetworkRequest.ManualRedirectPolicy,
+diff --git a/src/Mod/Part/App/Geometry.cpp b/src/Mod/Part/App/Geometry.cpp
+index abe7034d..3d962071 100644
+--- a/src/Mod/Part/App/Geometry.cpp
++++ b/src/Mod/Part/App/Geometry.cpp
+@@ -126,6 +126,7 @@
+ #include <memory>
+ #include <vector>
+ 
++#ifdef FCUseFreeType
+ // FreeType Headers
+ #include <ft2build.h>
+ #include FT_FREETYPE_H
+@@ -133,6 +134,7 @@
+ #include FT_OUTLINE_H
+ 
+ #include <hb.h>
++#endif
+ 
+ // headers to scale text correctly
+ #include <BRepBndLib.hxx>
+@@ -7367,6 +7369,7 @@ std::unique_ptr<GeomCurve> makeFromCurveAdaptor(const Adaptor3d_Curve& adapt, bo
+ 
+ 
+ // ===== TEXT TO EDGES (adapted from FT2FC.cpp) =====
++#ifdef FCUseFreeType
+ namespace
+ {
+ // Context for FreeType decomposition callbacks
+@@ -7484,6 +7487,7 @@ int cubic_cb(const FT_Vector* pt0, const FT_Vector* pt1, const FT_Vector* pt2, v
+ 
+ 
+ }  // end anonymous namespace
++#endif  // FCUseFreeType
+ 
+ /**
+  * @brief Takes a set of base shapes, transforms them to fit a two-point
+@@ -7646,6 +7650,12 @@ std::vector<TopoDS_Shape> makeTextWires(
+ #endif
+     }
+ 
++#ifndef FCUseFreeType
++    (void)height;
++    (void)tracking;
++    Base::Console().error("makeTextWires: FreeCAD was built without FreeType\n");
++    return {};
++#else
+     std::vector<TopoDS_Shape> allWires;
+     FT_Library ftLib;
+     if (FT_Init_FreeType(&ftLib) != 0) {
+@@ -7761,6 +7771,7 @@ std::vector<TopoDS_Shape> makeTextWires(
+     FT_Done_Face(ftFace);
+     FT_Done_FreeType(ftLib);
+     return allWires;
++#endif  // FCUseFreeType
+ }
+ 
+ }  // namespace Part
