@@ -384,7 +384,10 @@ jobs:
             `# commented in-source as 'do not make pivy a host dependency for cross` \
             `# compiling' -- which is exactly this build.` \
             -DFREECAD_CHECK_PIVY=OFF \
-            -DFREECAD_USE_EXTERNAL_PIVY=OFF -DFREECAD_USE_PCH=OFF \
+            `# FreeCAD main bundles Coin and Pivy as git submodules, which a source` \
+            `# tarball does not carry; use the Coin of the deps cache, as` \
+            `# configure-gui-weh.sh does.` \
+            -DFREECAD_USE_EXTERNAL_PIVY=OFF -DFREECAD_USE_EXTERNAL_COIN_PIVY=ON -DFREECAD_USE_PCH=OFF \
             -DFREECAD_QT_VERSION=6 \
             -DVTK_DIR="$DW/lib/cmake/vtk-9.3" \
             -DOpenCASCADE_DIR="$DW/lib/cmake/opencascade" \
