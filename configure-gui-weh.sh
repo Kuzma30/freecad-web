@@ -272,6 +272,8 @@ emcmake cmake -S deps/src/freecad -B build-freecad-gui-weh -G Ninja \
   -DBUILD_DYNAMIC_LINK_PYTHON=OFF \
   `# SetupCoin3D.cmake otherwise imports pivy in the HOST python to compare its Coin`   `# version against the one being built. That makes the cross-build depend on an`   `# ambient host package -- exactly the uncaptured-state problem this repo keeps`   `# getting bitten by. FreeCAD guards it for this reason; take the guard.`   `# E57_RELEASE_LTO defaults ON, putting INTERPROCEDURAL_OPTIMIZATION on the bundled` \n  `# libE57Format target ALONE. Nothing else here is built with LTO, so it buys nothing,` \n  `# and it makes emscripten build a separate set of port variants under` \n  `# sysroot/lib/wasm64-emscripten/thinlto/, where its ICU port dies with` \n  `#   tools/ports/icu.py:89 ... TypeError: expected str, bytes or os.PathLike, not NoneType` \n  `# check_ipo_supported() answers yes under emscripten, so it never switches itself off.` \n  -DE57_RELEASE_LTO=OFF \n  -DFREECAD_CHECK_PIVY=OFF \
   -DFREECAD_USE_EXTERNAL_PIVY=OFF `# FreeCAD main bundles Coin and Pivy as submodules; use ours` -DFREECAD_USE_EXTERNAL_COIN_PIVY=ON -DFREECAD_USE_PCH=OFF \
+  `# FreeCAD main asks rcc for zstd; Qt for wasm has no zstd and adds --no-zstd.` \
+  -DFREECAD_RCC_COMPRESSION_ALGO=zlib -DFREECAD_RCC_COMPRESSION_LEVEL=9 \
   `# FreeType ON: without it Part.makeWireString() raises "FreeCAD compiled without FreeType` \
   `# support!", which kills Draft ShapeString (text/engraving) entirely. Point it at the` \
   `# freetype matplotlib already builds and that is already on the link line. NOTE: Qt ships` \

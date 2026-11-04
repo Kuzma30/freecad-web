@@ -396,6 +396,10 @@ jobs:
             `# tarball does not carry; use the Coin of the deps cache, as` \
             `# configure-gui-weh.sh does.` \
             -DFREECAD_USE_EXTERNAL_PIVY=OFF -DFREECAD_USE_EXTERNAL_COIN_PIVY=ON -DFREECAD_USE_PCH=OFF \
+            `# FreeCAD main asks rcc for zstd (SetupQt.cmake), but Qt for wasm is built` \
+            `# without zstd and its rcc rules add --no-zstd: "--compression-algo=zstd and` \
+            `# --no-zstd both specified". zlib at its best level, as the runtime can read.` \
+            -DFREECAD_RCC_COMPRESSION_ALGO=zlib -DFREECAD_RCC_COMPRESSION_LEVEL=9 \
             -DFREECAD_QT_VERSION=6 \
             -DVTK_DIR="$DW/lib/cmake/vtk-9.3" \
             -DOpenCASCADE_DIR="$DW/lib/cmake/opencascade" \
