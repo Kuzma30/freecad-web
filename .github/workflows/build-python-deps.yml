@@ -87,9 +87,16 @@ jobs:
       # every later job restored the stripped ones and failed on a defect already fixed.
       # restore-keys still falls back to the newest entry, so widening this does not cost
       # a rebuild of the lanes that did not change.
+      # This box's own copy first (tools/pydeps-store.sh): pulling ~3.4 GB back through
+      # actions/cache is slow enough that its signed URL expires part way through.
+      - name: Restore the Python extension libraries (local store)
+        id: pylocal
+        if: ${{ !inputs.rebuild }}
+        run: bash tools/pydeps-store.sh restore "$PYDEPS_KEY"
+
       - name: Restore the Python extension libraries
         id: pycache
-        if: ${{ !inputs.rebuild }}
+        if: ${{ !inputs.rebuild && steps.pylocal.outputs.hit != 'true' }}
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -742,3 +749,9 @@ jobs:
             build-shiboken-wasm
             build-pyside-wasm
           key: fcweb-pydeps-${{ env.PYDEPS_KEY }}-${{ hashFiles('configure-*.sh', 'rebuild-pyside-weh.sh', 'build-shiboken-host.sh', 'build-cpython*.sh', 'patches/numpy.patch', 'patches/pyside-setup.patch', 'patches/pivy.patch', 'patches/apply.sh', 'tools/patch-pyside-*.py', 'tools/patch-shiboken-*.py', '*.meson.in', 'tools/stage-python-packages.sh', 'tools/verify-patch-applied.py') }}
+
+      # ...and into this box's store, which is what link-freecad restores from. always()
+      # for the same reason as the save above: partial progress is worth keeping.
+      - name: Save the Python extension libraries (local store)
+        if: always()
+        run: bash tools/pydeps-store.sh save "$PYDEPS_KEY"

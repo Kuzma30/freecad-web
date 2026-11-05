@@ -195,8 +195,18 @@ jobs:
       # copy predated deps/src/matplotlib and deps/wasm/include/freetype2 being added, so it
       # kept restoring the cache from before the freetype headers were staged and the job
       # failed on ft2build.h against a cache that had contained it for hours.
+      # The ~3.4 GB pydeps tree comes from this box's own store when it is there
+      # (tools/pydeps-store.sh); actions/cache is only the fallback for other runners. Its
+      # download crawls at a few MB/s and the signed URL expires before it finishes: link
+      # on 2026-11-04 failed "Server failed to authenticate the request" half way through,
+      # restored nothing, and every Python archive was reported missing.
+      - name: Restore the Python extension libraries (local store)
+        id: pydepslocal
+        run: bash tools/pydeps-store.sh restore "$PYDEPS_KEY"
+
       - name: Restore the Python extension libraries
         id: pydepscache
+        if: steps.pydepslocal.outputs.hit != 'true'
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -228,6 +238,11 @@ jobs:
           key: fcweb-pydeps-${{ env.PYDEPS_KEY }}-
           restore-keys: |
             fcweb-pydeps-${{ env.PYDEPS_KEY }}-
+
+      # Restored from GitHub this once: keep it here so the next run does not download it.
+      - name: Seed the local pydeps store
+        if: steps.pydepslocal.outputs.hit != 'true' && steps.pydepscache.outputs.cache-matched-key != '' && (inputs.runner || 'builder') != 'hosted'
+        run: bash tools/pydeps-store.sh save "$PYDEPS_KEY"
 
       # THE BUILD TREE LIVES ON THIS BOX, not in actions/cache.
       #
@@ -318,6 +333,23 @@ jobs:
           rm -rf "$BUILDTREE_STORE"
           echo "  build-tree store dropped at the user's request"
 
+      # emsdk comes BEFORE the input check: tools/check-archive-eh.sh reads the archives
+      # with emsdk's llvm-objdump, and on a box without the emsdk cache the check failed
+      # "no llvm-objdump -- cannot inspect anything" before emsdk was installed.
+      - name: Cache emsdk
+        id: emsdk-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: emsdk
+          key: emsdk-6.0.9-wasm64-shims-v1
+
+      - name: Install emsdk 6.0.9
+        if: steps.emsdk-cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git
+          cd emsdk && ./emsdk install 6.0.9 && ./emsdk activate 6.0.9
+
       # Every input the link names comes from another workflow. Say which one is missing and
       # which workflow makes it, rather than failing an hour later inside cmake or wasm-ld.
       - name: Is everything the link needs actually here?
@@ -379,20 +411,6 @@ jobs:
             bash tools/check-archive-eh.sh "$d" || fail=1
           done
           exit $fail
-
-      - name: Cache emsdk
-        id: emsdk-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: emsdk
-          key: emsdk-6.0.9-wasm64-shims-v1
-
-      - name: Install emsdk 6.0.9
-        if: steps.emsdk-cache.outputs.cache-hit != 'true'
-        run: |
-          set -e
-          git clone --depth 1 https://github.com/emscripten-core/emsdk.git
-          cd emsdk && ./emsdk install 6.0.9 && ./emsdk activate 6.0.9
 
       # THE COMPILE CACHE.
       #
