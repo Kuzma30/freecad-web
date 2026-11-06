@@ -102,6 +102,16 @@ done
     exit 1; }
 echo "freetype:     $FT_INC"
 
+# HarfBuzz. FreeCAD main shapes ShapeString text with it, and SetupFreeType.cmake stops with
+# "HarfBuzz not found" when FreeType is on. Use the copy Qt already links
+# (libQt6BundledHarfbuzz.a) -- a second one would collide with it -- and the headers of the
+# same version kept in third_party/ (Qt does not install them). See its README.
+HB_INC="$ROOT/third_party/harfbuzz-qt6.11.2/include"
+HB_LIB="$ROOT/qt/6.11.2/wasm_mt_weh/lib/libQt6BundledHarfbuzz.a"
+[ -f "$HB_INC/hb.h" ] || { echo "ERROR: no $HB_INC/hb.h" >&2; exit 1; }
+[ -f "$HB_LIB" ] || { echo "ERROR: no $HB_LIB -- Qt was built without its bundled HarfBuzz" >&2; exit 1; }
+echo "harfbuzz:     $HB_LIB"
+
 # IfcOpenShell's archives, taken from the directory rather than from a list. The list this
 # replaces named libgeometry_kernel_opencascade.a, which THIS build of IfcOpenShell does not
 # produce at all -- and omitted libgeometry_mapping_ifc2x3/ifc4/ifc4x3_add2 and
@@ -286,6 +296,7 @@ emcmake cmake -S deps/src/freecad -B build-freecad-gui-weh -G Ninja \
   -DFREETYPE_INCLUDE_DIR_freetype2="$FT_INC" \
   -DFREETYPE_LIBRARY="$ROOT/deps/wasm/lib/mpl-mod/libfreetype.a" \
   -DFREETYPE_LIBRARIES="$ROOT/deps/wasm/lib/mpl-mod/libfreetype.a" \
+  -DHARFBUZZ_INCLUDE_DIR="$HB_INC" -DHARFBUZZ_LIBRARY="$HB_LIB" \
   -DCMAKE_PREFIX_PATH="$DW;$ROOT/qt/6.11.2/wasm_mt_weh" \
   -DCMAKE_FIND_ROOT_PATH="$DW;$ROOT/qt/6.11.2/wasm_mt_weh" \
   -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \
