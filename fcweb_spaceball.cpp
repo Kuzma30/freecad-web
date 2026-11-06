@@ -325,7 +325,7 @@ EMSCRIPTEN_KEEPALIVE int fcweb_nl_read(int prop)
             Base::BoundBox3d boundingBox;
             for (auto& selection : Gui::Selection().getSelection()) {
                 if (auto* vp = Gui::Application::Instance->getViewProvider(selection.pObject)) {
-                    boundingBox.Add(vp->getBoundingBox(selection.SubName, true));
+                    boundingBox.Add(vp->getBoundingBox(selection.SubName, nullptr, true));
                 }
             }
             if (!boundingBox.IsValid()) {
