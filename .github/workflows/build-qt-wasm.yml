@@ -101,7 +101,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: qt/6.11.2/wasm_mt_weh
-          key: fcweb-qt-6.11.2-wasm64-eh-jspi-mt-emsdk6.0.9-v5
+          key: fcweb-qt-6.11.2-wasm64-eh-jspi-mt-emsdk6.0.9-v6-syshb
 
       - name: Install emsdk 6.0.9
         run: |
@@ -212,6 +212,20 @@ jobs:
           grep -c "static_cast<int64_t>" qt-src/qtbase/src/plugins/platforms/wasm/qwasmscreen.cpp | sed "s/^/  int64 crossings now in qwasmscreen.cpp: /"
           grep -c "FCWEB" qt-src/qtbase/src/plugins/platforms/wasm/qwasmopenglcontext.cpp | sed "s/^/  FCWEB notes now in qwasmopenglcontext.cpp: /"
 
+      # HarfBuzz WITH Unicode tables, built from Qt's own copy and installed into the Qt
+      # prefix; Qt is then configured with -harfbuzz system and uses it. Qt's bundled copy is
+      # built with HB_NO_UNICODE_FUNCS, and FreeCAD main's Part module (ShapeString) shapes
+      # text with HarfBuzz directly -- without the tables right-to-left and complex scripts
+      # come out unshaped. One HarfBuzz for Qt and FreeCAD, so no duplicate symbols either.
+      - name: HarfBuzz with Unicode tables
+        run: |
+          . ./toolchain/env.sh
+          rc=0
+          bash build-harfbuzz-weh.sh qt-src/qtbase/src/3rdparty/harfbuzz-ng/src \
+            "$GITHUB_WORKSPACE/qt/6.11.2/wasm_mt_weh" > /tmp/qtlogs/02c-harfbuzz.txt 2>&1 || rc=$?
+          tail -20 /tmp/qtlogs/02c-harfbuzz.txt
+          exit $rc
+
       # Only the modules FreeCAD actually links. Building all of Qt here would add hours for
       # things this app never loads.
       # Output is teed into the STEP SUMMARY, not just the log. GitHub's job-log API returned
@@ -264,7 +278,17 @@ jobs:
             -release -no-warnings-are-errors \
             -submodules qtbase,qtsvg,qtdeclarative,qttools \
             -skip qtwebengine \
-            -- -DCMAKE_POLICY_VERSION_MINIMUM=3.5 > /tmp/qtlogs/03-configure.txt 2>&1 || rc=$?
+            `# The HarfBuzz the previous step installed (with Unicode tables).` \
+            -harfbuzz system \
+            -- -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -Dharfbuzz_DIR="$GITHUB_WORKSPACE/qt/6.11.2/wasm_mt_weh/lib/cmake/harfbuzz" \
+            > /tmp/qtlogs/03-configure.txt 2>&1 || rc=$?
+          # Check that Qt really took the HarfBuzz built above and not its bundled one.
+          if [ "$rc" = 0 ] && ! grep -Eiq "Using system HarfBuzz[ .]*yes" config.summary; then
+            echo "::error::Qt is not using the HarfBuzz built above"
+            grep -i harfbuzz config.summary || true
+            rc=1
+          fi
           # CMake's own error files say far more than configure's stdout when the failure is
           # in a compile test, and they are the usual reason a wasm configure dies.
           for f in qt-build/CMakeFiles/CMakeError.log qt-build/CMakeFiles/CMakeOutput.log \
