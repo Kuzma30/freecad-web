@@ -105,13 +105,13 @@ echo "freetype:     $FT_INC"
 # HarfBuzz. FreeCAD main shapes ShapeString text with it, and SetupFreeType.cmake stops with
 # "HarfBuzz not found" when FreeType is on. It is the one build-qt-wasm.yml builds with its
 # Unicode tables (build-harfbuzz-weh.sh) and installs into the Qt prefix; Qt uses the same
-# library (-harfbuzz system), so there is one copy in the binary.
+# library (-system-harfbuzz), so there is one copy in the binary.
 QTP="$ROOT/qt/6.11.2/wasm_mt_weh"
 HB_INC="$QTP/include/harfbuzz"
 HB_LIB="$QTP/lib/libharfbuzz.a"
 [ -f "$HB_INC/hb.h" ] && [ -f "$HB_LIB" ] || {
     echo "ERROR: no HarfBuzz in $QTP (lib/libharfbuzz.a, include/harfbuzz/hb.h)." >&2
-    echo "       This Qt predates -harfbuzz system: rebuild it with build-qt-wasm.yml." >&2
+    echo "       This Qt predates -system-harfbuzz: rebuild it with build-qt-wasm.yml." >&2
     exit 1; }
 echo "harfbuzz:     $HB_LIB"
 

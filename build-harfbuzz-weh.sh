@@ -8,7 +8,7 @@
 # Unicode functions, so it does not need them. FreeCAD main's Part module (makeWireString,
 # Draft ShapeString) calls HarfBuzz directly and relies on hb_buffer_guess_segment_properties,
 # which without Unicode functions finds no script: right-to-left and complex scripts come out
-# unshaped. So Qt is configured with -harfbuzz system and this library is the one HarfBuzz in
+# unshaped. So Qt is configured with -system-harfbuzz and this library is the one HarfBuzz in
 # the binary -- Qt and FreeCAD both use it, and there is no second copy to collide with.
 #
 # The source is Qt's own copy (qt-src/qtbase/src/3rdparty/harfbuzz-ng/src), so the version is

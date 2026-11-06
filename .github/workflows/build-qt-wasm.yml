@@ -213,7 +213,7 @@ jobs:
           grep -c "FCWEB" qt-src/qtbase/src/plugins/platforms/wasm/qwasmopenglcontext.cpp | sed "s/^/  FCWEB notes now in qwasmopenglcontext.cpp: /"
 
       # HarfBuzz WITH Unicode tables, built from Qt's own copy and installed into the Qt
-      # prefix; Qt is then configured with -harfbuzz system and uses it. Qt's bundled copy is
+      # prefix; Qt is then configured with -system-harfbuzz and uses it. Qt's bundled copy is
       # built with HB_NO_UNICODE_FUNCS, and FreeCAD main's Part module (ShapeString) shapes
       # text with HarfBuzz directly -- without the tables right-to-left and complex scripts
       # come out unshaped. One HarfBuzz for Qt and FreeCAD, so no duplicate symbols either.
@@ -279,7 +279,7 @@ jobs:
             -submodules qtbase,qtsvg,qtdeclarative,qttools \
             -skip qtwebengine \
             `# The HarfBuzz the previous step installed (with Unicode tables).` \
-            -harfbuzz system \
+            -system-harfbuzz \
             -- -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -Dharfbuzz_DIR="$GITHUB_WORKSPACE/qt/6.11.2/wasm_mt_weh/lib/cmake/harfbuzz" \
             > /tmp/qtlogs/03-configure.txt 2>&1 || rc=$?
