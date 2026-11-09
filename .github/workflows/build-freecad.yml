@@ -223,8 +223,8 @@ jobs:
         run: |
           set -e
           . ./toolchain/env.sh
-          echo 'int main(){return 0;}' > /tmp/portprobe.cpp
-          em++ -pthread --use-port=zlib --use-port=icu -c /tmp/portprobe.cpp -o /tmp/portprobe.o
+          # Keeps the downloaded ICU source on the box and retries (tools/emports-prebuild.sh).
+          bash tools/emports-prebuild.sh
           sysroot="$(em-config CACHE)/sysroot"
           echo "sysroot=$sysroot" >> "$GITHUB_OUTPUT"
           echo "  sysroot: $sysroot"

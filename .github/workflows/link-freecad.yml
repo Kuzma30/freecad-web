@@ -529,8 +529,9 @@ jobs:
           # Emscripten caches port builds per settings-variant, so compiling one trivial
           # translation unit with the build's own flags builds and caches exactly the
           # variant the link will use.
-          echo 'int main(){return 0;}' > /tmp/icuprobe.cpp
-          em++ -pthread --use-port=zlib --use-port=icu -c /tmp/icuprobe.cpp -o /tmp/icuprobe.o
+          # The ICU source comes from GitHub on every fresh emscripten cache; keep the
+          # archive on the box and retry, so one 504 does not end the job.
+          bash tools/emports-prebuild.sh
           echo "  icu sysroot: $(em-config CACHE)/sysroot"
           echo "  icu libraries now in the cache:"
           find "$(em-config CACHE)" -name 'libicu*.a' | sed 's|.*/cache/|    |'
