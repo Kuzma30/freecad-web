@@ -203,7 +203,7 @@ index ab6881bb..be60ed39 100644
  #else
  #error "no supported OS platform defined"
 diff --git a/src/3rdParty/salomesmesh/CMakeLists.txt b/src/3rdParty/salomesmesh/CMakeLists.txt
-index 04114012..1c2122be 100644
+index 04114012..60d08600 100644
 --- a/src/3rdParty/salomesmesh/CMakeLists.txt
 +++ b/src/3rdParty/salomesmesh/CMakeLists.txt
 @@ -164,7 +164,14 @@ ENDIF(${CMAKE_SIZEOF_VOID_P} MATCHES "8")
@@ -222,7 +222,7 @@ index 04114012..1c2122be 100644
  ELSE(UNIX)
    IF(WIN32)
      ######### Windows ###########
-@@ -252,6 +259,16 @@ SET_BIN_DIR(SMESHDS)
+@@ -252,8 +259,23 @@ SET_BIN_DIR(SMESHDS)
  # SMESH #
  #########
  FILE(GLOB SMESH_source_files src/SMESH/*.c src/SMESH/*.cpp src/Controls/*.cpp inc/SMESH_*.h*)
@@ -235,10 +235,18 @@ index 04114012..1c2122be 100644
 +    # renders meshes via Coin, not MeshVS). Exclude it.
 +    FILE(GLOB SMESH_meshvs_files src/SMESH/SMESH_MeshVSLink.cpp)
 +    list(REMOVE_ITEM SMESH_source_files ${SMESH_meshvs_files})
++    # With the MED sources gone nothing needs medfile, and there is no medC target: the
++    # bare name became -lmedC and failed the FreeCAD link ("unable to find library").
++    set(SMESH_MEDC_LIBRARY "")
++else()
++    set(SMESH_MEDC_LIBRARY medC)
 +endif()
  ADD_LIBRARY(SMESH SHARED ${SMESH_source_files})
- TARGET_LINK_LIBRARIES(SMESH SMDS SMESHDS  Driver DriverSTL DriverDAT DriverUNV ${SMESH_LIBS} ${OPENCASCADE_LIBRARIES} ${OCC_LIBRARIES} ${OCC_DEBUG_LIBRARIES} ${OCC_OCAF_DEBUG_LIBRARIES} ${OCC_OCAF_LIBRARIES} medC ${VTK_LIBRARIES})
+-TARGET_LINK_LIBRARIES(SMESH SMDS SMESHDS  Driver DriverSTL DriverDAT DriverUNV ${SMESH_LIBS} ${OPENCASCADE_LIBRARIES} ${OCC_LIBRARIES} ${OCC_DEBUG_LIBRARIES} ${OCC_OCAF_DEBUG_LIBRARIES} ${OCC_OCAF_LIBRARIES} medC ${VTK_LIBRARIES})
++TARGET_LINK_LIBRARIES(SMESH SMDS SMESHDS  Driver DriverSTL DriverDAT DriverUNV ${SMESH_LIBS} ${OPENCASCADE_LIBRARIES} ${OCC_LIBRARIES} ${OCC_DEBUG_LIBRARIES} ${OCC_OCAF_DEBUG_LIBRARIES} ${OCC_OCAF_LIBRARIES} ${SMESH_MEDC_LIBRARY} ${VTK_LIBRARIES})
   
+ SET_BIN_DIR(SMESH)
+ if(WIN32)
 diff --git a/src/3rdParty/salomesmesh/inc/aptrte.h b/src/3rdParty/salomesmesh/inc/aptrte.h
 index cc7913b4..e232daee 100644
 --- a/src/3rdParty/salomesmesh/inc/aptrte.h
@@ -6930,3 +6938,65 @@ index a0eec61c..605ffd08 100644
  template<typename T, void (*destroy)(T*)>
  using FcPtr = std::unique_ptr<T, decltype([](T* object) { destroy(object); })>;
  
+diff --git a/src/Base/CrashReporter/Writer.cpp b/src/Base/CrashReporter/Writer.cpp
+index e59bca7e..ff0a7f57 100644
+--- a/src/Base/CrashReporter/Writer.cpp
++++ b/src/Base/CrashReporter/Writer.cpp
+@@ -164,7 +164,7 @@ static void writeRawBufferPOSIX(std::uint32_t fileSize)
+     // Raw syscalls only!!
+     int fd = open(crashReportFilePOSIX, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+     if (fd != -1) {
+-# if defined(FC_OS_LINUX)
++# if defined(FC_OS_LINUX) && !defined(FC_OS_EMSCRIPTEN)  // emscripten has no fallocate()
+         // Advisory, and a bare syscall wrapper so it is signal-safe.
+         fallocate(fd, 0, 0, fileSize);
+ # endif
+diff --git a/src/Mod/Part/App/SignalException.cpp b/src/Mod/Part/App/SignalException.cpp
+index ff5b0d2f..15dd90f6 100644
+--- a/src/Mod/Part/App/SignalException.cpp
++++ b/src/Mod/Part/App/SignalException.cpp
+@@ -23,7 +23,9 @@
+ 
+ #include "SignalException.h"
+ #include <FCConfig.h>
+-#if defined(__GNUC__) && defined(FC_OS_LINUX)
++// wasm: no POSIX signals to convert, and boost::stacktrace needs _Unwind_Backtrace, which
++// emscripten does not provide. SignalException is then a no-op, as on Windows.
++#if defined(__GNUC__) && defined(FC_OS_LINUX) && !defined(FC_OS_EMSCRIPTEN)
+ # include <array>
+ # include <boost/stacktrace.hpp>
+ # include <stdexcept>
+@@ -56,7 +58,7 @@
+ using namespace Part;
+ 
+ // NOLINTBEGIN(concurrency-mt-unsafe, cppcoreguidelines-pro-type-member-init)
+-#if defined(__GNUC__) && defined(FC_OS_LINUX)
++#if defined(__GNUC__) && defined(FC_OS_LINUX) && !defined(FC_OS_EMSCRIPTEN)
+ static OSD_SignalMode OSD_WasSetSignal = OSD_SignalMode_AsIs;  // NOLINT
+ 
+ static void SegvHandler(const int theSignal, siginfo_t* theSigInfo, const Standard_Address /*theContext*/)
+@@ -207,13 +209,13 @@ static void setSignal(OSD_SignalMode theSignalMode)
+ 
+ // ----------------------------------------------------------------------------
+ 
+-#if defined(__GNUC__) && defined(FC_OS_LINUX)
++#if defined(__GNUC__) && defined(FC_OS_LINUX) && !defined(FC_OS_EMSCRIPTEN)
+ static OSD_SignalMode currentSignalMode = OSD_SignalMode_Unset;  // NOLINT
+ #endif
+ 
+ SignalException::SignalException()
+ {
+-#if defined(__GNUC__) && defined(FC_OS_LINUX)
++#if defined(__GNUC__) && defined(FC_OS_LINUX) && !defined(FC_OS_EMSCRIPTEN)
+     if (currentSignalMode == OSD_SignalMode_Unset) {
+         currentSignalMode = OSD_SignalMode_Set;
+         setSignal(currentSignalMode);
+@@ -224,7 +226,7 @@ SignalException::SignalException()
+ 
+ SignalException::~SignalException()
+ {
+-#if defined(__GNUC__) && defined(FC_OS_LINUX)
++#if defined(__GNUC__) && defined(FC_OS_LINUX) && !defined(FC_OS_EMSCRIPTEN)
+     if (enabled && currentSignalMode == OSD_SignalMode_Set) {
+         currentSignalMode = OSD_SignalMode_Unset;
+         setSignal(currentSignalMode);
