@@ -71,10 +71,18 @@ FASTSIG="$FC_SRC/3rdParty/FastSignals/libfastsignals/include"
 # fcweb_spaceball.cpp calls into FreeCAD's Gui application class, which is a QApplication.
 # The navlib half reads the active view's Coin camera, so it needs FreeCAD's Gui headers in
 # full: generated headers, fmt (Base/Console.h), Python and Coin, as fcweb_qtconv does.
-FCGUIFLAGS="$QTCONVFLAGS -I$ROOT/build-freecad-gui-weh/_deps/fmt-src/include -I$QT/include/QtGui -I$QT/include/QtWidgets -I$QT/include/QtOpenGL -I$QT/include/QtOpenGLWidgets"
+# FreeCAD's own sources are built as CMake sets them up, not as the shiboken glue is: the C++
+# standard FreeCAD asks for (23 on main -- Base/Bitmask.h uses std::to_underlying; 20 on 1.1)
+# and QT_NO_KEYWORDS (SetupQt.cmake; FastSignals' signal.h has a local named "slots", which
+# Qt's keyword macro would erase).
+FC_CXXSTD="$(sed -n 's/.*set(CMAKE_CXX_STANDARD \([0-9][0-9]*\)).*/\1/p' \
+    "$FC_SRC/../cMake/FreeCAD_Helpers/CompilerChecksAndSetups.cmake" 2>/dev/null | head -1)"
+FC_CXXSTD="${FC_CXXSTD:-20}"
+FCGUIFLAGS="${QTCONVFLAGS/-std=c++20/-std=c++$FC_CXXSTD} -DQT_NO_KEYWORDS -I$ROOT/build-freecad-gui-weh/_deps/fmt-src/include -I$QT/include/QtGui -I$QT/include/QtWidgets -I$QT/include/QtOpenGL -I$QT/include/QtOpenGLWidgets"
 echo "  shiboken:       $SBK_SRC (+ $SBK_GEN)"
 echo "  freecad:        $FC_SRC (+ generated $FC_GEN)"
 [ -f "$FASTSIG/fastsignals/signal.h" ] && echo "  fastsignals:    $FASTSIG"
+echo "  freecad c++:    c++$FC_CXXSTD, QT_NO_KEYWORDS (fcweb_spaceball.cpp)"
 echo "  python include: $PYINC"
 echo "  qt include:     $QT/include${QTVER:+ (+ private $QTVER)}${QTMKSPEC:+ (+ mkspec $QTMKSPEC)}"
 
