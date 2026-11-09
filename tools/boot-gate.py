@@ -3656,6 +3656,11 @@ def main():
                          'their own timeout can hold CI for hours and say nothing until the '
                          'end; when this is spent the gate stops and names the scenario it '
                          'was in.')
+    ap.add_argument('--extra-query', default='',
+                    help='extra query string for the scenario-all page, e.g. "debug" -- '
+                         'pre-gui.js turns ?debug into FCWEB_DEBUG, and the startup steps '
+                         '(StartupProcess.cpp FCWEB_MARK) then print where they are, so a '
+                         'renderer that dies during startup names the last step it reached')
     ap.add_argument('--with-3d', action='store_true',
                     help='leave the 3D pipeline on (headless GL proves little; see V6)')
     args = ap.parse_args()
@@ -3739,6 +3744,8 @@ def main():
     else:
         url = 'http://127.0.0.1:%d/%s%s' % (args.port, args.page,
                                             '' if args.with_3d else '?no3d')
+    if args.extra_query:
+        url += ('&' if '?' in url else '?') + args.extra_query.lstrip('?&')
     profile = tempfile.mkdtemp(prefix='fcgate-profile-')
     try:
         with sync_playwright() as pw:
