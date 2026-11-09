@@ -78,7 +78,10 @@ FASTSIG="$FC_SRC/3rdParty/FastSignals/libfastsignals/include"
 FC_CXXSTD="$(sed -n 's/.*set(CMAKE_CXX_STANDARD \([0-9][0-9]*\)).*/\1/p' \
     "$FC_SRC/../cMake/FreeCAD_Helpers/CompilerChecksAndSetups.cmake" 2>/dev/null | head -1)"
 FC_CXXSTD="${FC_CXXSTD:-20}"
-FCGUIFLAGS="${QTCONVFLAGS/-std=c++20/-std=c++$FC_CXXSTD} -DQT_NO_KEYWORDS -I$ROOT/build-freecad-gui-weh/_deps/fmt-src/include -I$QT/include/QtGui -I$QT/include/QtWidgets -I$QT/include/QtOpenGL -I$QT/include/QtOpenGLWidgets"
+# fmt: 1.1 fetches it into the build tree (Base/Console.h); main uses std::format instead.
+FMT_INC="$ROOT/build-freecad-gui-weh/_deps/fmt-src/include"
+FMT_FLAG=""; [ -d "$FMT_INC" ] && FMT_FLAG="-I$FMT_INC"
+FCGUIFLAGS="${QTCONVFLAGS/-std=c++20/-std=c++$FC_CXXSTD} -DQT_NO_KEYWORDS $FMT_FLAG -I$QT/include/QtGui -I$QT/include/QtWidgets -I$QT/include/QtOpenGL -I$QT/include/QtOpenGLWidgets"
 echo "  shiboken:       $SBK_SRC (+ $SBK_GEN)"
 echo "  freecad:        $FC_SRC (+ generated $FC_GEN)"
 [ -f "$FASTSIG/fastsignals/signal.h" ] && echo "  fastsignals:    $FASTSIG"
