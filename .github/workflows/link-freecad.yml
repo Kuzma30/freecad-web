@@ -1084,7 +1084,7 @@ jobs:
           # cause is fixed (the gate now holds one engine, not eleven), but a harness that
           # can kill the build machine should not be able to do it twice: with a cap the
           # container dies and the runner survives to report it.
-          memgb=$(free -g | awk '/^Mem:/{print $2}')
+          memgb=$(awk '/^MemTotal:/{print int($2/1048576)}' /proc/meminfo)  # not free(1): its labels are localised ("Пам.:" on this box, so /^Mem:/ matched nothing and every gate got the 4G floor)
           cap=$(( memgb * 3 / 4 )); [ "$cap" -ge 4 ] || cap=4
           echo "  box has ${memgb}G; giving the gate ${cap}G"
           # PYTHONDONTWRITEBYTECODE: this container runs as root with the workspace bind-mounted,
@@ -1123,7 +1123,7 @@ jobs:
         run: |
           set -o pipefail
           set -e
-          memgb=$(free -g | awk '/^Mem:/{print $2}')
+          memgb=$(awk '/^MemTotal:/{print int($2/1048576)}' /proc/meminfo)  # not free(1): its labels are localised ("Пам.:" on this box, so /^Mem:/ matched nothing and every gate got the 4G floor)
           cap=$(( memgb * 3 / 4 )); [ "$cap" -ge 4 ] || cap=4
           docker run --rm --memory="${cap}g" --memory-swap="${cap}g" -v "$PWD:/w" -w /w -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 mcr.microsoft.com/playwright/python:v1.63.0-noble sh -c "pip install --quiet --break-system-packages playwright==1.63.0 >/dev/null 2>&1 || pip install --quiet playwright==1.63.0; python3 -u tools/boot-gate.py gate-serve --port 8796 --timeout 900 --scenario render --with-3d --budget 900" 2>&1 | tee /tmp/fclogs/render.txt
 
@@ -1176,7 +1176,7 @@ jobs:
         run: |
           set -o pipefail
           set -e
-          memgb=$(free -g | awk '/^Mem:/{print $2}')
+          memgb=$(awk '/^MemTotal:/{print int($2/1048576)}' /proc/meminfo)  # not free(1): its labels are localised ("Пам.:" on this box, so /^Mem:/ matched nothing and every gate got the 4G floor)
           cap=$(( memgb * 3 / 4 )); [ "$cap" -ge 4 ] || cap=4
           docker run --rm --memory="${cap}g" --memory-swap="${cap}g" -v "$PWD:/w" -w /w -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 mcr.microsoft.com/playwright/python:v1.63.0-noble sh -c "pip install --quiet --break-system-packages playwright==1.63.0 >/dev/null 2>&1 || pip install --quiet playwright==1.63.0; python3 -u tools/boot-gate.py gate-serve --port 8798 --timeout 900 --scenario project3d --with-3d --budget 900" 2>&1 | tee /tmp/fclogs/project3d.txt
 
@@ -1199,7 +1199,7 @@ jobs:
         run: |
           set -o pipefail
           set -e
-          memgb=$(free -g | awk '/^Mem:/{print $2}')
+          memgb=$(awk '/^MemTotal:/{print int($2/1048576)}' /proc/meminfo)  # not free(1): its labels are localised ("Пам.:" on this box, so /^Mem:/ matched nothing and every gate got the 4G floor)
           cap=$(( memgb * 3 / 4 )); [ "$cap" -ge 4 ] || cap=4
           docker run --rm --memory="${cap}g" --memory-swap="${cap}g" -v "$PWD:/w" -w /w -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 mcr.microsoft.com/playwright/python:v1.63.0-noble sh -c "pip install --quiet --break-system-packages playwright==1.63.0 >/dev/null 2>&1 || pip install --quiet playwright==1.63.0; python3 -u tools/boot-gate.py gate-serve --port 8799 --timeout 900 --scenario ui --with-3d --budget 900" 2>&1 | tee /tmp/fclogs/ui.txt
 
