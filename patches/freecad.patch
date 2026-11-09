@@ -7000,3 +7000,32 @@ index ff5b0d2f..15dd90f6 100644
      if (enabled && currentSignalMode == OSD_SignalMode_Set) {
          currentSignalMode = OSD_SignalMode_Unset;
          setSignal(currentSignalMode);
+diff --git a/src/Base/NumericFormatting.cpp b/src/Base/NumericFormatting.cpp
+index 82b2d9f8..731973ab 100644
+--- a/src/Base/NumericFormatting.cpp
++++ b/src/Base/NumericFormatting.cpp
+@@ -5,6 +5,7 @@
+ #include <algorithm>
+ #include <cmath>
+ #include <iomanip>
++#include <iostream>
+ #include <memory>
+ #include <mutex>
+ #include <sstream>
+@@ -311,6 +312,16 @@ Base::NumericLocaleContext Base::createNumericLocaleContext(std::string_view loc
+     UErrorCode status = U_ZERO_ERROR;
+     std::unique_ptr<icu::NumberFormat> numberFormat(icu::NumberFormat::createInstance(locale, status));
+     auto* decimalFormat = dynamic_cast<icu::DecimalFormat*>(numberFormat.get());
++#if defined(__EMSCRIPTEN__)
++    // The emscripten ICU port is built with stub data: no locale bundles, so NumberFormat
++    // cannot be created for any locale and App init used to stop here. Format numbers the
++    // C way instead ('.' decimal, ',' grouping), as for the C locale above.
++    if (U_FAILURE(status) || !decimalFormat) {
++        std::cerr << "NumericFormatting: no ICU locale data for " << normalizedLocaleId
++                  << ", using C number formatting\n";
++        return fallbackFormatting;
++    }
++#endif
+     if (U_FAILURE(status) || !decimalFormat) {
+         throw Base::RuntimeError(
+             "Failed to create ICU decimal-format symbols for: " + normalizedLocaleId
