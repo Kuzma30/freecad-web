@@ -2037,7 +2037,7 @@ index 06c01e13..7549c6be 100644
  
  void InputField::newInput(const QString& text)
 diff --git a/src/Gui/MainWindow.cpp b/src/Gui/MainWindow.cpp
-index dfb88378..7267d238 100644
+index dfb88378..d14fe35d 100644
 --- a/src/Gui/MainWindow.cpp
 +++ b/src/Gui/MainWindow.cpp
 @@ -586,9 +586,17 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags f)
@@ -2072,6 +2072,20 @@ index dfb88378..7267d238 100644
      // startup splasher
      // when running in verbose mode no splasher
      if (!(App::Application::Config()["Verbose"] == "Strict")
+@@ -2666,6 +2681,13 @@ void MainWindow::changeEvent(QEvent* e)
+         App::GetApplication().retranslateExportTypes();
+     }
+     else if (e->type() == QEvent::ActivationChange) {
++        // Qt for WebAssembly activates the main window as soon as it is created, before
++        // StartupPostProcess::loadOpenInventor() runs SoDB::init(); the real-time sensor does
++        // not exist yet and SoDB::enableRealTimeSensor() read out of bounds (wasm trap).
++        if (!SoDB::isInitialized()) {
++            QMainWindow::changeEvent(e);
++            return;
++        }
+         static SbTime savedRealTimeInterval = SoDB::getRealTimeInterval();
+         if (isActiveWindow()) {
+             QMdiSubWindow* mdi = d->mdiArea->currentSubWindow();
 diff --git a/src/Gui/ManualAlignment.cpp b/src/Gui/ManualAlignment.cpp
 index 339bdb34..7d2c469f 100644
 --- a/src/Gui/ManualAlignment.cpp

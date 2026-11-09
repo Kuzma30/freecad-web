@@ -178,6 +178,10 @@ PURE=(
     # wheel carries a C accelerator next to the pure package; yaml falls back to pure
     # Python when `yaml._yaml` cannot load, and the extractor below leaves the .so out.
     "PyYAML==6.0.2"
+    # defusedxml: FreeCAD main's Addon Manager parses add-on metadata with it
+    # (addonmanager_workers_startup.py: `from defusedxml import DefusedXmlException`);
+    # without it the workbench fails to load: "No module named 'defusedxml'".
+    "defusedxml==0.7.1"
 )
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
