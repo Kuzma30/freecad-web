@@ -497,3 +497,170 @@ diff --git a/src/shapenodes/SoShape.cpp b/src/shapenodes/SoShape.cpp
    delete soshape_staticstorage;
    soshape_staticstorage = NULL;
  
+diff --git a/src/rendering/SoVertexArrayIndexer.cpp b/src/rendering/SoVertexArrayIndexer.cpp
+--- a/src/rendering/SoVertexArrayIndexer.cpp
++++ b/src/rendering/SoVertexArrayIndexer.cpp
+@@ -50,6 +50,55 @@
+ #include "rendering/SoVBO.h"
+ #include "coindefs.h"
+ 
++#ifdef __EMSCRIPTEN__
++#include <vector>
++
++/* wasm: emscripten's legacy-GL emulation (libglemu.js) reads CLIENT-SIDE element indices
++   as 16-bit, whatever type glDrawElements is given -- it scans them with a u16 load to
++   find the vertex range and uploads count*2 bytes. Coin's vertex-array path passes
++   GL_UNSIGNED_INT, so every non-VBO indexed draw read garbage: a quad's six indices
++   {0,1,2,0,2,3} arrived as {0,0,1,0,2,0}. That path is what SORTED_OBJECT_SORTED_TRIANGLE_BLEND
++   (FreeCAD's transparency mode) uses for every transparent SoShape through
++   SoPrimitiveVertexCache, so an Image::ImagePlane with an alpha channel drew nothing, or
++   drew sheared triangles when several were on screen. Narrow the indices to GLushort and
++   say so. Indices >= 65536 cannot be expressed to the emulation at all; draw nothing
++   rather than garbage.
++
++   Second quirk on the same path: with planar (non-interleaved) client arrays the emulation
++   re-packs only the first `count` vertices, count being the INDEX count, so an index at or
++   beyond it reads unpacked memory (a strip of a large mesh, a line set sharing a triangle
++   cache's vertices). Pad the index list with copies of its last index up to max index + 1:
++   repeated indices make zero-area triangles and zero-length segments, which draw nothing. */
++static void
++fcwasm_draw_elements_u16(const cc_glglue * glue, GLenum mode, GLsizei count,
++                         const int32_t * idx)
++{
++  if (count <= 0) return;
++  static std::vector<GLushort> narrowed;
++  narrowed.resize(static_cast<size_t>(count));
++  int32_t maxidx = 0;
++  for (GLsizei i = 0; i < count; i++) {
++    if (idx[i] < 0 || idx[i] > 0xffff) {
++      static SbBool warned = FALSE;
++      if (!warned) {
++        warned = TRUE;
++        fprintf(stderr, "Coin(wasm): client-side draw with a vertex index above 65535 skipped\n");
++      }
++      return;
++    }
++    narrowed[i] = static_cast<GLushort>(idx[i]);
++    if (idx[i] > maxidx) maxidx = idx[i];
++  }
++  GLsizei padded = count;
++  if (maxidx + 1 > padded) padded = maxidx + 1;
++  if (mode == GL_TRIANGLES) padded = (padded + 2) / 3 * 3;
++  else if (mode == GL_LINES) padded = (padded + 1) / 2 * 2;
++  const GLushort last = narrowed[count - 1];  // by value: resize may reallocate
++  narrowed.resize(static_cast<size_t>(padded), last);
++  cc_glglue_glDrawElements(glue, mode, padded, GL_UNSIGNED_SHORT, narrowed.data());
++}
++#endif
++
+ #if BOOST_WORKAROUND(COIN_MSVC, <= COIN_MSVC_6_0_VERSION)
+ // symbol length truncation
+ #pragma warning(disable:4786)
+@@ -277,14 +326,27 @@
+     }
+     else {
+       const GLint * idxptr = this->indexarray.getArrayPtr();
++#ifdef __EMSCRIPTEN__
++      fcwasm_draw_elements_u16(glue, this->target, this->indexarray.getLength(), idxptr);
++#else
+       cc_glglue_glDrawElements(glue,
+                                this->target,
+                                this->indexarray.getLength(),
+                                GL_UNSIGNED_INT,
+                                idxptr);
++#endif
+     }
+     break;
+   default:
++#ifdef __EMSCRIPTEN__
++    // Client-side here as well (no VBO in this branch): same 16-bit narrowing, one strip
++    // or fan at a time. glMultiDrawElements is not emulated.
++    for (int i = 0; i < this->countarray.getLength(); i++) {
++      fcwasm_draw_elements_u16(glue, this->target, this->countarray[i],
++                               reinterpret_cast<const int32_t *>(this->ciarray[i]));
++    }
++    break;
++#endif
+     if (SoGLDriverDatabase::isSupported(glue, SO_GL_MULTIDRAW_ELEMENTS)) {
+       cc_glglue_glMultiDrawElements(glue,
+                                     this->target,
+diff --git a/src/caches/SoPrimitiveVertexCache.cpp b/src/caches/SoPrimitiveVertexCache.cpp
+--- a/src/caches/SoPrimitiveVertexCache.cpp
++++ b/src/caches/SoPrimitiveVertexCache.cpp
+@@ -227,6 +227,20 @@
+ 
+ #define PRIVATE(obj) ((obj)->pimpl)
+ 
++/* wasm: emscripten's legacy-GL emulation mis-feeds a 4-component texture coordinate ARRAY
++   (glTexCoordPointer(4, GL_FLOAT, ...), which is what this cache keeps): the geometry
++   comes out right and the texture lands sheared across it. That is the path
++   SORTED_OBJECT_SORTED_TRIANGLE_BLEND -- FreeCAD's transparency mode -- takes for every
++   transparent textured SoShape, i.e. an Image::ImagePlane whose picture has an alpha
++   channel (a PDF crop on a transparent page drew as garbage or not at all). Textured
++   draws from this cache go through immediate mode on wasm instead, with 2D coordinates,
++   the path an opaque image plane already takes. Untextured draws keep the arrays. */
++#ifdef __EMSCRIPTEN__
++#define FCWASM_IMMEDIATE_TEXCOORDS(texture) (texture)
++#else
++#define FCWASM_IMMEDIATE_TEXCOORDS(texture) FALSE
++#endif
++
+ // *************************************************************************
+ 
+ namespace {
+@@ -368,7 +382,8 @@
+     PRIVATE(this)->vertexvbo ||
+     SoGLVBOElement::shouldCreateVBO(state, PRIVATE(this)->vertexlist.getLength());
+ 
+-  if (renderasvbo) {
++  // wasm: see FCWASM_IMMEDIATE_TEXCOORDS above.
++  if (renderasvbo && !FCWASM_IMMEDIATE_TEXCOORDS(texture)) {
+     if (!SoGLDriverDatabase::isSupported(glue, SO_GL_VBO_IN_DISPLAYLIST)) {
+       SoCacheElement::invalidate(state);
+       SoGLCacheContextElement::shouldAutoCache(state,
+@@ -381,7 +396,8 @@
+     PRIVATE(this)->triangleindexer->render(glue, TRUE, contextid);
+     thisp->disableVBOs(glue, color, normal, texture, enabled, lastenabled);
+   }
+-  else if (SoGLDriverDatabase::isSupported(glue, SO_GL_VERTEX_ARRAY)) {
++  else if (SoGLDriverDatabase::isSupported(glue, SO_GL_VERTEX_ARRAY) &&
++           !FCWASM_IMMEDIATE_TEXCOORDS(texture)) {
+     SoPrimitiveVertexCacheP * thisp = const_cast<SoPrimitiveVertexCacheP *>(&PRIVATE(this).get());
+     thisp->enableArrays(glue, color, normal, texture, enabled, lastenabled);
+     PRIVATE(this)->triangleindexer->render(glue, FALSE, contextid);
+@@ -422,7 +438,8 @@
+   const cc_glglue * glue = sogl_glue_instance(state);
+   const uint32_t contextid = SoGLCacheContextElement::get(state);
+ 
+-  if (SoGLDriverDatabase::isSupported(glue, SO_GL_VERTEX_ARRAY)) {
++  if (SoGLDriverDatabase::isSupported(glue, SO_GL_VERTEX_ARRAY) &&
++      !FCWASM_IMMEDIATE_TEXCOORDS(texture)) {
+     SoPrimitiveVertexCacheP * thisp = const_cast<SoPrimitiveVertexCacheP *>(&PRIVATE(this).get());
+     thisp->enableArrays(glue, color, normal, texture, enabled, lastenabled);
+     PRIVATE(this)->lineindexer->render(glue, FALSE, contextid);
+@@ -462,7 +479,8 @@
+   const cc_glglue * glue = sogl_glue_instance(state);
+   const uint32_t contextid = SoGLCacheContextElement::get(state);
+ 
+-  if (SoGLDriverDatabase::isSupported(glue, SO_GL_VERTEX_ARRAY)) {
++  if (SoGLDriverDatabase::isSupported(glue, SO_GL_VERTEX_ARRAY) &&
++      !FCWASM_IMMEDIATE_TEXCOORDS(texture)) {
+     SoPrimitiveVertexCacheP * thisp = const_cast<SoPrimitiveVertexCacheP *>(&PRIVATE(this).get());
+     thisp->enableArrays(glue, color, normal, texture, enabled, lastenabled);
+     PRIVATE(this)->pointindexer->render(glue, FALSE, contextid);
+@@ -1118,7 +1136,15 @@
+       glColor3ubv(reinterpret_cast<const GLubyte *>(&colorptr[idx*4]));
+     }
+     if (texture) {
++#ifdef __EMSCRIPTEN__
++      // glTexCoord4f is not emulated (a no-op in the patched FreeCAD.js); 2D textures
++      // need s/q, t/q only.
++      const SbVec4f & tc = texcoordptr[idx];
++      const float q = (tc[3] != 0.0f) ? tc[3] : 1.0f;
++      glTexCoord2f(tc[0] / q, tc[1] / q);
++#else
+       glTexCoord4fv(reinterpret_cast<const GLfloat *>(&texcoordptr[idx]));
++#endif
+ 
+       for (int j = 1; j <= lastenabled; j++) {
+         if (enabled[j]) {
