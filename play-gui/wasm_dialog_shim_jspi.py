@@ -50,11 +50,53 @@ def install():
     MB.warning     = _make_static(MB.Ok)
     MB.critical    = _make_static(MB.Ok)
 
-    # instance .exec()/.exec_() on QMessageBox -> blocking HTML with its own buttons
+    # instance .exec()/.exec_() on QMessageBox -> blocking HTML with ITS buttons.
+    #
+    # Every button counts, not just standardButtons(): a box built with
+    # addButton("Embed in FCStd", AcceptRole) -- the Documentation workbench's "How should
+    # this be stored?" -- otherwise showed only its Cancel, and the file could not be added.
+    # The chosen button is click()ed, so clickedButton() reports it exactly as after a real
+    # click (QMessageBox records it from the button box's clicked signal).
     def _mb_exec(self, *a, **k):
         try:
-            flags = self.standardButtons()
-            return _ask(self.windowTitle(), self.text(), flags)
+            btns = list(self.buttons())
+            if not btns:
+                return _ask(self.windowTitle(), self.text(), self.standardButtons())
+            # fcwebConfirm answers Escape with the FIRST button and Enter with the LAST (the
+            # highlighted one), so: the cancel-like buttons first, the default button last.
+            esc_b, def_b = self.escapeButton(), self.defaultButton()
+            def _rank(b):
+                if b is def_b:
+                    return 2
+                if b is esc_b or self.buttonRole(b) in (MB.RejectRole, MB.NoRole):
+                    return 0
+                return 1
+            btns.sort(key=_rank)
+            labels = [b.text().replace("&&", "\0").replace("&", "").replace("\0", "&")
+                      or "OK" for b in btns]
+            body = self.text()
+            info = self.informativeText()
+            if info:
+                body = body + "\n\n" + info if body else info
+            idx = _fcwebdlg.confirm(str(self.windowTitle() or "FreeCAD"), str(body or ""), labels)
+            if idx is None or idx < 0 or idx >= len(btns):
+                # Dismissed: Qt's escape button, else a reject/no-role one, else nothing.
+                b = self.escapeButton()
+                if b is None:
+                    for c in btns:
+                        if self.buttonRole(c) in (MB.RejectRole, MB.NoRole):
+                            b = c
+                            break
+                if b is None:
+                    return MB.NoButton
+            else:
+                b = btns[idx]
+            try:
+                b.click()
+            except Exception:
+                pass
+            std = self.standardButton(b)
+            return std if int(std) else btns.index(b)
         except Exception:
             return MB.Ok
     MB.exec = _mb_exec
