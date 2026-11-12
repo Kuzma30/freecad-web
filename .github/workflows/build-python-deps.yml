@@ -382,17 +382,17 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: qt/6.11.2/wasm_mt_weh
-          key: fcweb-qt-6.11.2-wasm64-eh-jspi-mt-emsdk6.0.9-v6-syshb
+          key: fcweb-qt-6.11.2-wasm64-eh-jspi-mt-emsdk6.0.9-v7-syshb-qtpdf
 
       - name: Host Qt 6.11.2 (tools only)
         continue-on-error: true
         run: |
           set -e
-          if [ -x qt-host/6.11.2/gcc_64/bin/moc ]; then echo "  host Qt present"; exit 0; fi
+          if [ -x qt-host/6.11.2/gcc_64/libexec/moc ] || [ -x qt-host/6.11.2/gcc_64/bin/moc ]; then echo "  host Qt present"; exit 0; fi
           . .qtvenv/bin/activate
           python -m pip install --quiet aqtinstall
           python -m aqt install-qt linux desktop 6.11.2 linux_gcc_64 -m qtshadertools -O "$PWD/qt-host"
-          ls qt-host/6.11.2/gcc_64/bin/moc && echo "  host Qt installed"
+          ls qt-host/6.11.2/gcc_64/libexec/moc && echo "  host Qt installed"
 
 
       # An archive that exists is not an archive built for this target. The first wasm64-keyed
@@ -556,6 +556,9 @@ jobs:
           if [ -s deps/wasm/lib/ifc-mod/lib_ifcopenshell_wrapper.a ] && grep -qx 3 deps/wasm/lib/ifc-mod/.staged 2>/dev/null && [ "${{ inputs.rebuild }}" != "true" ]; then
             echo "  IfcOpenShell: already built"; exit 0
           fi
+          # The pinned swig 4.2.1 lives in .qtvenv (see "Build tools"); without this the
+          # configure finds no swig, or the runner's incompatible one.
+          . .qtvenv/bin/activate
           bash configure-ifcopenshell-weh.sh
 
       # shiboken's GENERATOR runs on the host and parses Qt's headers with libclang. It
