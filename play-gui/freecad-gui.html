@@ -3247,9 +3247,29 @@ window.fcRunPy = fcRunPy;
      // can read Module.wasmBinary and force CPython's direct-call trampoline
      // (no JS frame) — required for JSPI to suspend across CPython frames.
      let __fcWasmBytes, __fcDataBytes;
+     // The wasm bytes are NOT optional: without them emscripten streams the module itself,
+     // the parser above never runs, and CPython's trampoline falls back to arity 3 for every
+     // C function -- the first 2-argument getter then traps 'function signature mismatch'
+     // during Init ("Searching for modules", App::MetadataPy). A dropped connection mid-way
+     // through the ~40 MB download did exactly that on the live site. So retry, and refuse
+     // to boot a guaranteed-broken engine if the bytes still do not arrive.
+     for (let attempt = 1; attempt <= 3 && !__fcWasmBytes; attempt++) {
+       try {
+         __fcWasmBytes = await __engineFetch(WASM_URL, 'wasm', (n,_t,cached) => {
+           __wasmGot = n; if (!cached) __fromCache = false; __report(); });
+       } catch(e){
+         append('engine download failed (attempt ' + attempt + '/3): ' + e, 'err');
+         try { console.error('[fcweb] engine download failed (attempt ' + attempt + '/3): ' + e); } catch(_){}
+         __wasmGot = 0;
+       }
+     }
+     if (!__fcWasmBytes) {
+       try { window.fcwebNotify && window.fcwebNotify('Could not download the FreeCAD engine. '
+         + 'Check the connection and reload the page.', 'error',
+         [{ label: 'Reload', onClick: function () { location.reload(); } }]); } catch (e) {}
+       throw new Error('FreeCAD.wasm could not be downloaded');
+     }
      try {
-       __fcWasmBytes = await __engineFetch(WASM_URL, 'wasm', (n,_t,cached) => {
-         __wasmGot = n; if (!cached) __fromCache = false; __report(); });
        // Prefetch the package too, and hand it to emscripten via getPreloadedPackage
        // below. Doing it here rather than letting the Module fetch it is what makes it
        // cacheable at all -- and it is a documented emscripten hook, so no relink and no
