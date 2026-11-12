@@ -53,6 +53,8 @@ on:
       # watching it meant a patch fix triggered only the COMPILE check and never a relink
       # -- the artifact would stay stale while CI went green.
       - 'patches/freecad.patch'
+      - 'patches/freecad-pdf.patch'
+      - 'patches/freecad-spinbox.patch'
       # apply.sh applies this one to the pyside-setup tree the Python-lane cache restores,
       # and refuses a tree stamped with a different version of it -- so a change to the
       # patch must re-run the link, or a rerun on an older commit fails at that refusal.
@@ -126,7 +128,7 @@ env:
   # otherwise delete the very thing this is meant to preserve.
   BUILDTREE_STORE: /home/ubuntu/.cache/fcweb-buildtree
   DEPS_KEY: v2-wasm64-emsdk6.0.9-xerces3.2.5-occt8.1-3d097a03-fillets25-vtk9.3.1-coin4.0.3-boost1.86
-  QT_KEY: fcweb-qt-6.11.2-wasm64-eh-jspi-mt-emsdk6.0.9-v6-syshb
+  QT_KEY: fcweb-qt-6.11.2-wasm64-eh-jspi-mt-emsdk6.0.9-v7-syshb-qtpdf
   PYDEPS_KEY: v2-wasm64-emsdk6.0.9-cpython3.13.3-numpy2.1.3-mpl3.9.2
 
 jobs:
@@ -299,7 +301,7 @@ jobs:
             build-freecad-gui-weh
             freecad-gui-install
             weh-objs
-          key: fcweb-fclink-${{ env.DEPS_KEY }}-${{ hashFiles('patches/freecad.patch', 'configure-gui-weh.sh') }}
+          key: fcweb-fclink-${{ env.DEPS_KEY }}-${{ hashFiles('patches/freecad.patch', 'patches/freecad-pdf.patch', 'patches/freecad-spinbox.patch', 'configure-gui-weh.sh') }}
           restore-keys: |
             fcweb-fclink-${{ env.DEPS_KEY }}-
 

@@ -181,6 +181,18 @@ check_freecad_version
 
 echo "Applying source patches:"
 apply_one freecad       freecad.patch
+# FreeCAD's native PDF viewer (Gui::PdfView on QtPdf) and the Documentation workbench, plus
+# the resolution/transparency options of the 3D view PDF export: the two commits of the
+# pdfread_split branch, as one diff rebased onto the commit in freecad.version. Applied on
+# top of the port; it touches none of the port's hunks. The viewer is compiled only when
+# Qt6::Pdf and Qt6::PdfWidgets are found, which build-qt-wasm.yml now installs into the
+# wasm Qt (patches/qt-qtpdf-wasm.patch).
+apply_one freecad       freecad-pdf.patch
+# QuantitySpinBox: the arrow keys / wheel step the digit under the caret (or the selected
+# digit) instead of singleStep, also in engineering notation (1.5e-3: a mantissa digit
+# adds 10^n, an exponent digit shifts the exponent). From the spinbox branch of
+# github.com/Kuzma30/FreeCAD, simplified onto Base::scanLocalizedNumber.
+apply_one freecad       freecad-spinbox.patch
 # Marker rather than a reverse-apply check: tools/patch-pyside-clang-options.py edits inside
 # the branch this patch adds, so after one build the file matches neither direction.
 apply_one pyside-setup  pyside-setup.patch \

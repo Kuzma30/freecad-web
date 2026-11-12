@@ -1,0 +1,338 @@
+Qt PDF (QtPdf + QtPdfWidgets, pdfium) for WebAssembly, on Qt 6.11.2's qtwebengine.
+
+From the qtpdf-wasm project (built and browser-tested there on Qt 6.11.3, single-threaded
+wasm32; applies at zero fuzz to 6.11.2). Paths are relative to the qt-everywhere source root,
+so build-qt-wasm.yml's patches/qt-*.patch loop applies it with the others. What it changes:
+- configure.cmake: WASM is a supported QtPdf platform, emscripten clang a supported
+  compiler; on wasm QtPdf needs only Qt::Gui.
+- cmake/QtToolchainHelpers.cmake: GN arch "wasm", GN os "emscripten", GN args for the
+  emsdk clang; Qt's wasm flags (-fwasm-exceptions -sSUPPORT_LONGJMP=wasm, -pthread,
+  -msimd128, MEMORY64) are passed into pdfium so it is ABI-compatible with this Qt. emcc
+  also appends EMCC_CFLAGS (-m64 -sWASM_LEGACY_EXCEPTIONS=0, toolchain/env.sh) to every
+  pdfium compile, which is what makes the objects wasm64 on the new EH model.
+- cmake/QtGnGen.cmake: GN runs with a dotfile rooted at the QtPdf target, since Chromium's
+  //BUILD.gn cannot be evaluated for emscripten.
+- src/pdf/CMakeLists.txt: toolchains and GN args for wasm (no partition_alloc etc.).
+- src/pdf/qpdfpagerenderer.cpp: without thread support always SingleThreaded.
+- chromium BUILDCONFIG.gn: target_os="emscripten" allowed for is_qtpdf; compiler/BUILD.gn:
+  no -flto=full for QtPdf (plain objects in a static library, like the rest of Qt).
+- pdfium fxge: the generic Linux font module (no system fonts; built-in base-14 fonts).
+- pdfium libopenjpeg: no fseeko/ftello under emscripten.
+
+diff --git a/qtwebengine/cmake/QtGnGen.cmake b/qtwebengine/cmake/QtGnGen.cmake
+index 7522a2e..b451764 100644
+--- a/qtwebengine/cmake/QtGnGen.cmake
++++ b/qtwebengine/cmake/QtGnGen.cmake
+@@ -72,6 +72,15 @@ if(GN_THREADS)
+ endif()
+ 
+ file(READ ${build_dir}/args.gn gn_arg_arg)
++
++# WebAssembly (Qt PDF only): Chromium's //BUILD.gn pulls in lots of targets which can not
++# be evaluated for emscripten. Use a dotfile whose root is our QtPdf target instead.
++if(gn_arg_arg MATCHES "target_os=\"emscripten\"")
++    file(READ ${WEBENGINE_ROOT_SOURCE_DIR}/src/3rdparty/chromium/.gn gn_dotfile)
++    string(APPEND gn_dotfile "\n# Qt PDF for WebAssembly\nroot = \"${build_dir}:QtPdf\"\nroot_patterns = [ \"${build_dir}:QtPdf\" ]\n")
++    file(WRITE ${build_dir}/qtpdf_wasm.gn "${gn_dotfile}")
++    list(APPEND gn_arg --dotfile=${build_dir}/qtpdf_wasm.gn)
++endif()
+ STRING(REGEX REPLACE "\n" ";" print_arg_arg "${gn_arg_arg}")
+ LIST(SORT print_arg_arg)
+ STRING(REGEX REPLACE ";" "\n" print_arg_arg "${print_arg_arg}")
+diff --git a/qtwebengine/cmake/QtToolchainHelpers.cmake b/qtwebengine/cmake/QtToolchainHelpers.cmake
+index b0cd2dd..2651af6 100644
+--- a/qtwebengine/cmake/QtToolchainHelpers.cmake
++++ b/qtwebengine/cmake/QtToolchainHelpers.cmake
+@@ -55,6 +55,8 @@ function(get_gn_arch result arch)
+         set(${result} "mips64el" PARENT_SCOPE)
+     elseif(arch STREQUAL "riscv64")
+         set(${result} "riscv64" PARENT_SCOPE)
++    elseif(arch STREQUAL "wasm" OR arch STREQUAL "wasm32")
++        set(${result} "wasm" PARENT_SCOPE)
+     else()
+         message(FATAL_ERROR "Unknown architecture: ${arch}")
+     endif()
+@@ -95,6 +97,8 @@ function(get_gn_os result)
+         set(${result} "mac" PARENT_SCOPE)
+     elseif(IOS)
+         set(${result} "ios" PARENT_SCOPE)
++    elseif(WASM)
++        set(${result} "emscripten" PARENT_SCOPE)
+     else()
+         message(DEBUG "Unrecognized OS")
+     endif()
+@@ -147,6 +151,24 @@ function(configure_gn_toolchain name cpu v8Cpu toolchainIn toolchainOut)
+         set(GN_EXTRA_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+     endif()
+ 
++    if(WASM AND name STREQUAL "target")
++        # Keep pdfium ABI-compatible with the Qt for WebAssembly build
++        set(wasm_flags "")
++        if(QT_FEATURE_wasm_exceptions)
++            string(APPEND wasm_flags " -fwasm-exceptions -sSUPPORT_LONGJMP=wasm")
++        endif()
++        if(QT_FEATURE_wasm_simd128)
++            string(APPEND wasm_flags " -msimd128")
++        endif()
++        if(QT_FEATURE_thread)
++            string(APPEND wasm_flags " -pthread")
++        endif()
++        if(WASM64)
++            string(APPEND wasm_flags " -sMEMORY64=1")
++        endif()
++        string(APPEND GN_EXTRA_C_FLAGS "${wasm_flags}")
++        string(APPEND GN_EXTRA_CXX_FLAGS "${wasm_flags}")
++    endif()
+     set(GN_CPU ${cpu})
+     set(GN_V8_CPU ${v8Cpu})
+     configure_file(${toolchainIn} ${toolchainOut}/BUILD.gn @ONLY)
+@@ -396,7 +418,29 @@ macro(append_compiler_linker_sdk_setup)
+     extend_gn_list(gnArgArg ARGS is_msvc CONDITION MSVC)
+     extend_gn_list(gnArgArg ARGS is_gcc CONDITION LINUX AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+ 
+-    if(CLANG)
++    if(WASM)
++        # Emscripten (emcc/em++) is a self-contained clang toolchain,
++        # its clang lives in <emsdk>/upstream/bin, next to <emsdk>/upstream/emscripten/emcc
++        get_filename_component(emscripten_dir "${CMAKE_C_COMPILER}" DIRECTORY)
++        get_filename_component(emscripten_llvm_dir "${emscripten_dir}/.." ABSOLUTE)
++        file(GLOB emscripten_clang_version RELATIVE "${emscripten_llvm_dir}/lib/clang"
++            "${emscripten_llvm_dir}/lib/clang/*")
++        list(GET emscripten_clang_version 0 emscripten_clang_version)
++        list(APPEND gnArgArg
++            clang_base_path="${emscripten_llvm_dir}"
++            clang_version="${emscripten_clang_version}"
++            emscripten_path="${emscripten_dir}/"
++            is_clang=true
++            clang_use_chrome_plugins=false
++            fatal_linker_warnings=false
++            use_lld=false
++            use_libcxx=false
++            use_llvm_libatomic=false
++            use_debug_fission=false
++            use_clang_profiling=false
++            use_clang_coverage=false
++        )
++    elseif(CLANG)
+         get_clang_runtime_path_version(clang_runtime_path_version)
+         if (NOT DEFINED clang_runtime_path_version)
+             message(FATAL_ERROR "Clang version for runtime is missing."
+@@ -466,7 +510,7 @@ macro(append_compiler_linker_sdk_setup)
+         endif()
+         list(APPEND gnArgArg use_llvm_libatomic=false)
+     endif()
+-    if(CLANG OR QT_FEATURE_webengine_rust_build)
++    if((CLANG AND NOT WASM) OR QT_FEATURE_webengine_rust_build)
+         list(APPEND gnArgArg libclang_path="${QWELibClang_LIBRARY_DIR}")
+ 
+         #TODO: This is Linux specific for now.
+@@ -536,10 +580,12 @@ macro(append_compiler_linker_sdk_setup)
+         ARGS use_gold
+         CONDITION QT_FEATURE_use_gold_linker
+     )
+-    extend_gn_list(gnArgArg
+-        ARGS use_lld
+-        CONDITION QT_FEATURE_use_lld_linker OR (MSVC AND CLANG)
+-    )
++    if(NOT WASM)
++        extend_gn_list(gnArgArg
++            ARGS use_lld
++            CONDITION QT_FEATURE_use_lld_linker OR (MSVC AND CLANG)
++        )
++    endif()
+     extend_gn_list(gnArgArg
+         ARGS use_mold
+         CONDITION QT_FEATURE_use_mold_linker
+@@ -601,6 +647,14 @@ macro(append_toolchain_setup)
+         endif()
+         unset(host_cpu)
+         unset(target_cpu)
++    elseif(WASM)
++        list(APPEND gnArgArg
++            target_os="emscripten"
++            target_cpu="wasm"
++            custom_toolchain="${buildDir}/target_toolchain:target"
++            host_toolchain="${buildDir}/host_toolchain:host"
++            v8_snapshot_toolchain="${buildDir}/v8_toolchain:v8"
++        )
+     elseif(LINUX)
+         get_gn_arch(cpu ${TEST_architecture_arch})
+         list(APPEND gnArgArg
+diff --git a/qtwebengine/configure.cmake b/qtwebengine/configure.cmake
+index 0d60a9b..ee2a12f 100644
+--- a/qtwebengine/configure.cmake
++++ b/qtwebengine/configure.cmake
+@@ -300,8 +300,14 @@ qt_webengine_configure_check("cmake"
+ 
+ set(targets_to_check Gui Quick Qml)
+ foreach(target_to_check ${targets_to_check})
++    # WebAssembly: QtPdf itself only needs Qt::Gui (Quick is optional, enables QtPdfQuick)
++    if(WASM AND NOT target_to_check STREQUAL "Gui")
++        set(required_modules QtWebEngine)
++    else()
++        set(required_modules QtWebEngine QtPdf)
++    endif()
+     qt_webengine_configure_check("required-target-${target_to_check}"
+-        MODULES QtWebEngine QtPdf
++        MODULES ${required_modules}
+         CONDITION TARGET Qt::${target_to_check}
+         MESSAGE "Missing required Qt::${target_to_check}."
+     )
+@@ -315,8 +321,8 @@ qt_webengine_configure_check("supported-platform"
+ )
+ qt_webengine_configure_check("supported-platform"
+     MODULES QtPdf
+-    CONDITION LINUX OR WIN32 OR MACOS OR IOS OR ANDROID
+-    MESSAGE "Build can be done only on Linux, Windows, macO, iOS and Android."
++    CONDITION LINUX OR WIN32 OR MACOS OR IOS OR ANDROID OR WASM
++    MESSAGE "Build can be done only on Linux, Windows, macO, iOS, Android and WebAssembly."
+ )
+ 
+ if(LINUX AND CMAKE_CROSSCOMPILING)
+@@ -445,6 +451,7 @@ qt_webengine_configure_check("compiler"
+         (LINUX AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang") OR
+         (APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang") OR
+         (ANDROID AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang") OR
++        (WASM AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang") OR
+         (MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU") OR
+         (MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+     MESSAGE
+diff --git a/qtwebengine/src/3rdparty/chromium/build/config/BUILDCONFIG.gn b/qtwebengine/src/3rdparty/chromium/build/config/BUILDCONFIG.gn
+index 67c2e7b..aba775a 100644
+--- a/qtwebengine/src/3rdparty/chromium/build/config/BUILDCONFIG.gn
++++ b/qtwebengine/src/3rdparty/chromium/build/config/BUILDCONFIG.gn
+@@ -303,8 +303,9 @@ if (target_os == "android") {
+   _default_toolchain = "//build/toolchain/zos:$target_cpu"
+ } else if (target_os == "emscripten") {
+   # Because it's too hard to remove all targets from //BUILD.gn that do not work with it.
++  # Qt PDF only builds //third_party/pdfium and provides its own custom_toolchain.
+   assert(
+-      false,
++      is_qtpdf && custom_toolchain != "",
+       "emscripten is not a supported target_os. It is available only as secondary toolchain.")
+ } else if (target_os == "ohos") {
+   _default_toolchain = "//build/toolchain/ohos:ohos_clang_$target_cpu"
+diff --git a/qtwebengine/src/3rdparty/chromium/build/config/compiler/BUILD.gn b/qtwebengine/src/3rdparty/chromium/build/config/compiler/BUILD.gn
+index b621ebc..c0f0d37 100644
+--- a/qtwebengine/src/3rdparty/chromium/build/config/compiler/BUILD.gn
++++ b/qtwebengine/src/3rdparty/chromium/build/config/compiler/BUILD.gn
+@@ -857,7 +857,8 @@ config("compiler") {
+       "LLD_REPORT_UNDEFINED=1",
+     ]
+ 
+-    if (is_official_build) {
++    # Qt PDF ships a static library for Qt's wasm build which does not use LTO
++    if (is_official_build && !is_qtpdf) {
+       cflags += [ "-flto=full" ]
+       ldflags += [ "-flto=full" ]
+     }
+diff --git a/qtwebengine/src/3rdparty/chromium/third_party/pdfium/core/fxge/BUILD.gn b/qtwebengine/src/3rdparty/chromium/third_party/pdfium/core/fxge/BUILD.gn
+index 317aa1c..70c4225 100644
+--- a/qtwebengine/src/3rdparty/chromium/third_party/pdfium/core/fxge/BUILD.gn
++++ b/qtwebengine/src/3rdparty/chromium/third_party/pdfium/core/fxge/BUILD.gn
+@@ -160,7 +160,8 @@ source_set("fxge") {
+     ]
+   }
+ 
+-  if (is_linux || is_chromeos || is_ohos) {
++  # Qt PDF for WebAssembly: emscripten uses the generic (fontconfig-free) Linux impl
++  if (is_linux || is_chromeos || is_ohos || is_wasm) {
+     sources += [ "linux/fx_linux_impl.cpp" ]
+   }
+ 
+diff --git a/qtwebengine/src/3rdparty/chromium/third_party/pdfium/core/fxge/linux/fx_linux_impl.cpp b/qtwebengine/src/3rdparty/chromium/third_party/pdfium/core/fxge/linux/fx_linux_impl.cpp
+index 6887127..f3ca6db 100644
+--- a/qtwebengine/src/3rdparty/chromium/third_party/pdfium/core/fxge/linux/fx_linux_impl.cpp
++++ b/qtwebengine/src/3rdparty/chromium/third_party/pdfium/core/fxge/linux/fx_linux_impl.cpp
+@@ -19,7 +19,8 @@
+ #include "core/fxge/fx_font.h"
+ #include "core/fxge/systemfontinfo_iface.h"
+ 
+-#if !BUILDFLAG(IS_LINUX) && !BUILDFLAG(IS_CHROMEOS) && !defined(OS_ASMJS)
++#if !BUILDFLAG(IS_LINUX) && !BUILDFLAG(IS_CHROMEOS) && !defined(OS_ASMJS) && \
++    !defined(__EMSCRIPTEN__)
+ #error "Included on the wrong platform"
+ #endif
+ 
+diff --git a/qtwebengine/src/3rdparty/chromium/third_party/pdfium/third_party/libopenjpeg/opj_config_private.h b/qtwebengine/src/3rdparty/chromium/third_party/pdfium/third_party/libopenjpeg/opj_config_private.h
+index 74a8845..c393097 100644
+--- a/qtwebengine/src/3rdparty/chromium/third_party/pdfium/third_party/libopenjpeg/opj_config_private.h
++++ b/qtwebengine/src/3rdparty/chromium/third_party/pdfium/third_party/libopenjpeg/opj_config_private.h
+@@ -21,7 +21,10 @@
+ /* #undef _LARGEFILE_SOURCE */
+ /* #undef _LARGE_FILES */
+ /* #undef _FILE_OFFSET_BITS */
++/* Qt PDF for WebAssembly: musl only declares fseeko() with POSIX feature macros */
++#if !defined(__EMSCRIPTEN__)
+ #define OPJ_HAVE_FSEEKO ON
++#endif
+ 
+ /* Byte order.  */
+ /* All compilers that support Mac OS X define either __BIG_ENDIAN__ or
+diff --git a/qtwebengine/src/pdf/CMakeLists.txt b/qtwebengine/src/pdf/CMakeLists.txt
+index 1dd9c55..97cdefe 100644
+--- a/qtwebengine/src/pdf/CMakeLists.txt
++++ b/qtwebengine/src/pdf/CMakeLists.txt
+@@ -71,7 +71,7 @@ add_dependencies(prepare_docs_Pdf generate_pdf_attributions)
+ #   TOOLCHAIN SETUP
+ ##
+ 
+-if(LINUX OR MINGW OR ANDROID OR WIN32)
++if(LINUX OR MINGW OR ANDROID OR WIN32 OR WASM)
+     setup_toolchains()
+ endif()
+ 
+@@ -173,6 +173,27 @@ foreach(arch ${archs})
+                 CONDITION QT_FEATURE_webengine_gcc_legacy_support
+             )
+          endif()
++        if(WASM)
++            list(APPEND gnArgArg
++                enable_base_tracing=false
++                use_udev=false
++                use_glib=false
++                use_gio=false
++                use_ozone=false
++                use_x11=false
++                use_nss_certs=false
++                use_xkbcommon=false
++                is_cfi=false
++                use_remoteexec=false
++                use_siso=false
++                use_clang_modules=false
++                pdf_use_partition_alloc=false
++                use_partition_alloc=false
++                enable_backup_ref_ptr_support=false
++                use_raw_ptr_backup_ref_impl=false
++                use_safe_libstdcxx=false
++            )
++        endif()
+         if(MACOS)
+             list(APPEND gnArgArg angle_enable_vulkan=false)
+         endif()
+diff --git a/qtwebengine/src/pdf/qpdfpagerenderer.cpp b/qtwebengine/src/pdf/qpdfpagerenderer.cpp
+index 771fc67..60ec4a7 100644
+--- a/qtwebengine/src/pdf/qpdfpagerenderer.cpp
++++ b/qtwebengine/src/pdf/qpdfpagerenderer.cpp
+@@ -190,6 +190,9 @@ QPdfPageRenderer::~QPdfPageRenderer()
+ 
+     By default, this property is \c RenderMode::SingleThreaded.
+ 
++    On platforms without thread support (for example single-threaded
++    WebAssembly builds) the mode is always \c RenderMode::SingleThreaded.
++
+     \sa setRenderMode(), RenderMode
+ */
+ 
+@@ -210,6 +213,11 @@ QPdfPageRenderer::RenderMode QPdfPageRenderer::renderMode() const
+ */
+ void QPdfPageRenderer::setRenderMode(RenderMode mode)
+ {
++#if !QT_CONFIG(thread)
++    // No worker threads available (e.g. single-threaded WebAssembly):
++    // always render in the calling thread.
++    mode = RenderMode::SingleThreaded;
++#endif
+     if (d_ptr->m_renderMode == mode)
+         return;
+ 

@@ -101,7 +101,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: qt/6.11.2/wasm_mt_weh
-          key: fcweb-qt-6.11.2-wasm64-eh-jspi-mt-emsdk6.0.9-v6-syshb
+          key: fcweb-qt-6.11.2-wasm64-eh-jspi-mt-emsdk6.0.9-v7-syshb-qtpdf
 
       - name: Install emsdk 6.0.9
         run: |
@@ -170,8 +170,15 @@ jobs:
         run: |
           set -o pipefail
           rc=0
-          { curl -fsSL -o /tmp/qt.tar.xz \
-              https://download.qt.io/archive/qt/6.11/6.11.2/single/qt-everywhere-src-6.11.2.tar.xz &&
+          # FCWEB_QT_TARBALL: an already downloaded copy of the same tarball (a local run of
+          # this lane, tools/run-workflow-local.py), checked against the published sha256.
+          qturl=https://download.qt.io/archive/qt/6.11/6.11.2/single/qt-everywhere-src-6.11.2.tar.xz
+          { if [ -n "${FCWEB_QT_TARBALL:-}" ] && [ -s "$FCWEB_QT_TARBALL" ]; then
+              want="$(curl -fsSL "$qturl.sha256" | cut -d' ' -f1)" &&
+              echo "$want  $FCWEB_QT_TARBALL" | sha256sum -c - && cp "$FCWEB_QT_TARBALL" /tmp/qt.tar.xz
+            else
+              curl -fsSL -o /tmp/qt.tar.xz "$qturl"
+            fi &&
             mkdir -p qt-src && tar xJf /tmp/qt.tar.xz -C qt-src --strip-components=1
           } > /tmp/qtlogs/02-src.txt 2>&1 || rc=$?
           ls qt-src/configure >> /tmp/qtlogs/02-src.txt 2>&1 || true
@@ -320,6 +327,67 @@ jobs:
           echo "  === Qt build exit=$rc in $((SECONDS-t0))s ==="
           tail -40 /tmp/qtlogs/05-build.txt
           exit $rc
+
+      # Qt PDF (QtPdf + QtPdfWidgets, pdfium inside) for FreeCAD's native PDF viewer
+      # (Gui::PdfView and the Documentation workbench, patches/freecad-pdf.patch). Stock Qt
+      # does not build QtPdf for wasm at all: qtwebengine's configure allows only desktop and
+      # mobile platforms, and Chromium's GN refuses target_os="emscripten".
+      # patches/qt-qtpdf-wasm.patch (applied with the other qt-*.patch above) makes it build:
+      # GN runs with a dotfile rooted at the QtPdf target only, pdfium uses the generic Linux
+      # font module (base-14 built-in fonts, no system fonts in a browser), and pdfium is
+      # compiled with the same wasm-EH/thread/memory64 flags as this Qt.
+      #
+      # Built AFTER Qt and as a module of the installed Qt (qt-configure-module), so the Qt
+      # build above stays exactly what it was; QtPdf only adds Qt6Pdf/Qt6PdfWidgets to the
+      # same prefix. GN is a host tool and the aqtinstall host Qt does not carry it, so it is
+      # built from qtwebengine's own copy first.
+      - name: GN (host tool for QtPdf)
+        run: |
+          set -o pipefail
+          rc=0
+          gnhost="$GITHUB_WORKSPACE/qt-host/6.11.2/gcc_64"
+          { cmake -G Ninja -S qt-src/qtwebengine/src/gn -B qt-build-gn \
+              -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PWD/qt-build-gn/install" &&
+            cmake --build qt-build-gn --parallel && cmake --install qt-build-gn &&
+            install -D -m755 qt-build-gn/install/bin/gn "$gnhost/libexec/gn" &&
+            "$gnhost/libexec/gn" --version
+          } > /tmp/qtlogs/06-gn.txt 2>&1 || rc=$?
+          tail -5 /tmp/qtlogs/06-gn.txt
+          exit $rc
+
+      - name: QtPdf for wasm
+        id: qtpdf
+        run: |
+          set -o pipefail
+          . ./toolchain/env.sh
+          t0=$SECONDS
+          rc=0
+          prefix="$GITHUB_WORKSPACE/qt/6.11.2/wasm_mt_weh"
+          shim="$GITHUB_WORKSPACE/qt-emsdk-shim"
+          rm -rf qt-build-pdf && mkdir -p qt-build-pdf
+          { cd qt-build-pdf &&
+            EMSDK="$shim" "$prefix/bin/qt-configure-module" ../qt-src/qtwebengine \
+              -no-feature-qtwebengine-build -feature-qtpdf-build \
+              -- -DCMAKE_POLICY_VERSION_MINIMUM=3.5 &&
+            EMSDK="$shim" cmake --build . --parallel &&
+            EMSDK="$shim" cmake --install . && cd ..
+          } > /tmp/qtlogs/07-qtpdf.txt 2>&1 || rc=$?
+          cd "$GITHUB_WORKSPACE"
+          echo "  === QtPdf build exit=$rc in $((SECONDS-t0))s ==="
+          tail -40 /tmp/qtlogs/07-qtpdf.txt
+          [ "$rc" = 0 ] || exit $rc
+          # Built is not the same as built for THIS world: one wasm32 object or one object on
+          # the legacy EH model in libQt6Pdf.a and the FreeCAD link fails, or worse, links and
+          # never starts in Chrome. Read the objects rather than trusting the flags.
+          for a in libQt6Pdf.a libQt6PdfWidgets.a; do
+            [ -s "$prefix/lib/$a" ] || { echo "::error::$a was not installed"; exit 1; }
+            echo "  $a: $(du -h "$prefix/lib/$a" | cut -f1)"
+          done
+          python3 tools/check-archive-target.py --expect wasm64 "$prefix/lib/libQt6Pdf.a" "$prefix/lib/libQt6PdfWidgets.a"
+          bash tools/check-archive-eh.sh "$prefix/lib/libQt6Pdf.a" "$prefix/lib/libQt6PdfWidgets.a"
+          [ -f "$prefix/lib/cmake/Qt6PdfWidgets/Qt6PdfWidgetsConfig.cmake" ] \
+            || { echo "::error::Qt6PdfWidgets CMake package missing -- FreeCAD would build without the PDF viewer"; exit 1; }
+          echo "secs=$((SECONDS-t0))" >> "$GITHUB_OUTPUT"
 
       # THE POINT OF ALL THE ABOVE. The jobs/logs API 404s for this repo; the artifacts API
       # works. So the diagnostics leave by the door that is actually open.

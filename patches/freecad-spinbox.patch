@@ -1,0 +1,296 @@
+diff --git a/src/Gui/QuantitySpinBox.cpp b/src/Gui/QuantitySpinBox.cpp
+index 173e057ccf..f0435cb420 100644
+--- a/src/Gui/QuantitySpinBox.cpp
++++ b/src/Gui/QuantitySpinBox.cpp
+@@ -20,7 +20,13 @@
+  *                                                                         *
+  ***************************************************************************/
+ 
++#include <algorithm>
++#include <cmath>
+ #include <limits>
++#include <optional>
++#include <string>
++#include <utility>
++#include <vector>
+ #include <QApplication>
+ #include <QDebug>
+ #include <QFocusEvent>
+@@ -283,6 +289,72 @@ bool QuantitySpinBox::apply(const std::string& propName)
+     return false;
+ }
+ 
++namespace
++{
++
++/// Digits of the number at the start of an editor text, with the power of ten each one
++/// carries. Engineering notation is handled: in "1.25e-3" the '5' carries 10^-5 and the
++/// exponent's '3' is listed separately, with power 0 within the exponent.
++struct NumberDigits
++{
++    double value {};
++    int length {};  ///< UTF-16 length of the number token
++    std::vector<std::pair<int, int>> mantissa;  ///< (text index, power of ten in the value)
++    std::vector<std::pair<int, int>> exponent;  ///< (text index, power of ten in the exponent)
++};
++
++std::optional<NumberDigits> scanNumberDigits(const QString& text, const Base::NumericLocaleContext& ctx)
++{
++    const QByteArray utf8 = text.toUtf8();
++    const auto scan = Base::scanLocalizedNumber(
++        std::string_view {utf8.constData(), static_cast<std::size_t>(utf8.size())},
++        ctx,
++        Base::NumericSyntaxContext::Standalone
++    );
++    if (scan.status != Base::LocalizedNumberResult::Status::Complete || scan.consumedBytes == 0) {
++        return std::nullopt;
++    }
++
++    NumberDigits number;
++    number.value = scan.value;
++    number.length = QString::fromUtf8(utf8.constData(), static_cast<int>(scan.consumedBytes)).size();
++
++    const QString token = text.left(number.length);
++    int ePos = token.indexOf(QLatin1Char('e'), 0, Qt::CaseInsensitive);
++    if (ePos < 0) {
++        ePos = number.length;
++    }
++    const QString dec = QString::fromStdString(ctx.decimalSeparator);
++    int decPos = dec.isEmpty() ? -1 : token.left(ePos).indexOf(dec);
++    if (decPos < 0) {
++        decPos = ePos;
++    }
++    const auto e = scan.canonicalText.find('e');
++    const int exp10 = e == std::string::npos ? 0 : std::stoi(scan.canonicalText.substr(e + 1));
++
++    int power = exp10;
++    for (int i = decPos - 1; i >= 0; --i) {
++        if (token.at(i).isDigit()) {
++            number.mantissa.emplace_back(i, power++);
++        }
++    }
++    power = exp10 - 1;
++    for (int i = decPos + static_cast<int>(dec.size()); i < ePos; ++i) {
++        if (token.at(i).isDigit()) {
++            number.mantissa.emplace_back(i, power--);
++        }
++    }
++    power = 0;
++    for (int i = number.length - 1; i > ePos; --i) {
++        if (token.at(i).isDigit()) {
++            number.exponent.emplace_back(i, power++);
++        }
++    }
++    return number;
++}
++
++}  // namespace
++
+ void QuantitySpinBox::resizeEvent(QResizeEvent* event)
+ {
+     QAbstractSpinBox::resizeEvent(event);
+@@ -911,6 +983,121 @@ QAbstractSpinBox::StepEnabled QuantitySpinBox::stepEnabled() const
+     return ret;
+ }
+ 
++std::optional<QuantitySpinBox::DigitTarget> QuantitySpinBox::digitTargetAtCursor(
++    const double baseValue
++) const
++{
++    Q_D(const QuantitySpinBox);
++    QLineEdit* le = lineEdit();
++    const QString text = le->text();
++    const auto ctx = Gui::numericLocaleContextFor(locale());
++    const auto number = scanNumberDigits(text, ctx);
++    if (!number || number->mantissa.empty()) {
++        return std::nullopt;
++    }
++
++    int index = -1;
++    const bool hasSelection = le->hasSelectedText();
++    if (hasSelection) {
++        const int start = le->selectionStart();
++        const int end = start + le->selectedText().size();
++        if (start <= 0 && end >= number->length) {
++            // The whole number is selected (after focusing the field or a normal step):
++            // keep the classic singleStep behaviour.
++            return std::nullopt;
++        }
++        // Rightmost digit of the selection that belongs to the number.
++        for (int i = std::min(end, number->length) - 1; i >= start && index < 0; --i) {
++            if (text.at(i).isDigit()) {
++                index = i;
++            }
++        }
++    }
++    else {
++        // Caret: the digit to the left of it, or, at the very start, the one to the right.
++        const int pos = le->cursorPosition();
++        if (pos > 0 && pos <= number->length && text.at(pos - 1).isDigit()) {
++            index = pos - 1;
++        }
++        else if (pos < number->length && text.at(pos).isDigit()) {
++            index = pos;
++        }
++    }
++    if (index < 0) {
++        return std::nullopt;
++    }
++
++    // Size of one unit of the number as written, which need not be the display unit: the
++    // user may have typed "1 cm" or "1.5e-3 mm" where the schema shows mm or µm. Ask the
++    // quantity parser what "1" followed by the rest of the text is, then check that the number
++    // times that really is the value being stepped. That rejects expressions ("2+3 mm"),
++    // invalid edits and stale text, where the digit says nothing about the step size.
++    App::QuantityConstraints constraints;
++    if (d->unit != Base::Unit::One) {
++        constraints.requiredUnit = d->unit;
++    }
++    const QString probe = QStringLiteral("1") + text.mid(number->length);
++    const auto unit = App::interpretQuantityInput(
++        probe.toUtf8().toStdString(),
++        App::QuantityInputGrammar::Quantity,
++        getPath(),
++        d->displayUnit,
++        ctx,
++        App::InputPhase::Commit,
++        constraints
++    );
++    if (unit.status != App::InputStatus::Acceptable || !unit.quantity) {
++        return std::nullopt;
++    }
++    const double scale = unit.quantity->getValue();
++    const int lowest = number->mantissa.back().second;
++    const double tolerance = (0.5 * std::pow(10.0, lowest) + 1e-9 * std::abs(number->value))
++        * std::abs(scale);
++    if (scale == 0.0 || std::abs(number->value * scale - baseValue) > tolerance) {
++        return std::nullopt;
++    }
++
++    for (const auto& [i, power] : number->mantissa) {
++        if (i == index) {
++            return DigitTarget {power, false, hasSelection, scale};
++        }
++    }
++    for (const auto& [i, power] : number->exponent) {
++        if (i == index) {
++            return DigitTarget {power, true, hasSelection, scale};
++        }
++    }
++    return std::nullopt;
++}
++
++void QuantitySpinBox::restoreDigitTarget(const DigitTarget& target, const double displayScale)
++{
++    QLineEdit* le = lineEdit();
++    const auto number = scanNumberDigits(le->text(), Gui::numericLocaleContextFor(locale()));
++    const auto* digits = number ? (target.inExponent ? &number->exponent : &number->mantissa)
++                                : nullptr;
++    if (!digits || digits->empty()) {
++        selectNumber();
++        return;
++    }
++    // The text is now in the display unit, which may differ from the one typed (1 cm is shown
++    // as 10 mm): keep the digit of the same absolute weight. The re-formatted text may also
++    // have lost that digit (10 -> 0 drops the tens): take the closest one.
++    int power = target.power;
++    if (!target.inExponent) {
++        power += static_cast<int>(std::lround(std::log10(target.scale / displayScale)));
++    }
++    const auto closest = std::min_element(digits->begin(), digits->end(), [&](auto a, auto b) {
++        return std::abs(a.second - power) < std::abs(b.second - power);
++    });
++    if (target.selection) {
++        le->setSelection(closest->first, 1);
++    }
++    else {
++        le->setCursorPosition(closest->first + 1);
++    }
++}
++
+ void QuantitySpinBox::stepBy(int steps)
+ {
+     Q_D(QuantitySpinBox);
+@@ -921,19 +1108,41 @@ void QuantitySpinBox::stepBy(int steps)
+ 
+     // Re-select the display unit for the value being stepped. A pending edit can cross a
+     // magnitude-dependent schema threshold, in which case the cached display unit is stale.
+-    double displayFactor;
+-    QString displaySymbol;
+-    getUserString(base, displayFactor, displaySymbol);
+-    const App::QuantityInputUnit steppingUnit {base.getUnit(), displaySymbol.toStdString()};
+-    Q_UNUSED(displayFactor);
+-
+-    const double displayScale = steppingUnit.getScale().getValue();
++    const auto displayScaleOf = [this](const Base::Quantity& quantity) {
++        double displayFactor;
++        QString displaySymbol;
++        getUserString(quantity, displayFactor, displaySymbol);
++        return App::QuantityInputUnit {quantity.getUnit(), displaySymbol.toStdString()}
++            .getScale()
++            .getValue();
++    };
++    const double displayScale = displayScaleOf(base);
+     const double displayedValue = base.getValue() / displayScale;
+-    const double steppedValue = displayedValue + steps * d->singleStep;
+-    Quantity quant(steppedValue * displayScale, steppingUnit.getUnit());
++
++    // If the caret sits in a digit of the number, or a digit is selected, step that digit
++    // instead of singleStep: a mantissa digit adds 10^power, an exponent digit (1.5e-3)
++    // shifts the exponent by 10^power. With the whole number selected, or when the digit
++    // cannot be determined reliably, the step is singleStep as before.
++    const std::optional<DigitTarget> digit = digitTargetAtCursor(base.getValue());
++    double steppedValue = (displayedValue + steps * d->singleStep) * displayScale;
++    if (digit && digit->inExponent) {
++        steppedValue = base.getValue() * std::pow(10.0, steps * std::pow(10.0, digit->power));
++    }
++    else if (digit) {
++        steppedValue = base.getValue() + steps * std::pow(10.0, digit->power) * digit->scale;
++    }
++    if (!std::isfinite(steppedValue)) {
++        return;
++    }
++    Quantity quant(steppedValue, base.getUnit());
+     commitQuantity(quant, TextPolicy::ReformatEditor, true);
+     update();
+-    selectNumber();
++    if (digit) {
++        restoreDigitTarget(*digit, displayScaleOf(d->quantity));
++    }
++    else {
++        selectNumber();
++    }
+ }
+ 
+ QSize QuantitySpinBox::sizeForText(const QString& txt) const
+diff --git a/src/Gui/QuantitySpinBox.h b/src/Gui/QuantitySpinBox.h
+index df9fcd5a68..7b1bfa6854 100644
+--- a/src/Gui/QuantitySpinBox.h
++++ b/src/Gui/QuantitySpinBox.h
+@@ -23,6 +23,8 @@
+ 
+ #pragma once
+ 
++#include <optional>
++
+ #include <Gui/MetaTypes.h>
+ #include <Gui/SpinBox.h>
+ 
+@@ -207,6 +209,17 @@ private:
+     void validateInput() override;
+     void commitQuantity(Base::Quantity quantity, TextPolicy textPolicy, bool notify);
+     void updateText(const Base::Quantity&);
++
++    /// Digit of the editor text that a step should act on (see stepBy()).
++    struct DigitTarget
++    {
++        int power;        ///< power of ten of the digit (0 = units, -1 = tenths, 1 = tens ...)
++        bool inExponent;  ///< the digit belongs to the exponent of 1.5e-3, not the mantissa
++        bool selection;   ///< true if the digit was selected, false if it was a plain caret
++        double scale;     ///< internal units per unit of the number as written
++    };
++    std::optional<DigitTarget> digitTargetAtCursor(double baseValue) const;
++    void restoreDigitTarget(const DigitTarget& target, double displayScale);
+     void updateEdit(const QString& text);
+     void updateFromCache(bool notify, bool updateUnit = true);
+     QString getUserString(const Base::Quantity& val, double& factor, QString& unitString) const;

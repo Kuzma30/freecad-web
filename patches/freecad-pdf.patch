@@ -1,0 +1,5157 @@
+diff --git a/cMake/FreeCAD_Helpers/InitializeFreeCADBuildOptions.cmake b/cMake/FreeCAD_Helpers/InitializeFreeCADBuildOptions.cmake
+index d4652f2804..375d50a46b 100644
+--- a/cMake/FreeCAD_Helpers/InitializeFreeCADBuildOptions.cmake
++++ b/cMake/FreeCAD_Helpers/InitializeFreeCADBuildOptions.cmake
+@@ -178,6 +178,7 @@ macro(InitializeFreeCADBuildOptions)
+     option(BUILD_TEST "Build the FreeCAD test module" ON)
+     option(BUILD_MEASURE "Build the FreeCAD Measure module" ON)
+     option(BUILD_TECHDRAW "Build the FreeCAD Technical Drawing module" ON)
++    option(BUILD_DOCUMENTATION "Build the FreeCAD Documentation module" ON)
+     option(BUILD_TUX "Build the FreeCAD Tux module" ON)
+     option(BUILD_WEB "Build the FreeCAD Web module" ON)
+     option(BUILD_SURFACE "Build the FreeCAD surface module" ON)
+diff --git a/cMake/FreeCAD_Helpers/PrintFinalReport.cmake b/cMake/FreeCAD_Helpers/PrintFinalReport.cmake
+index bebc31b9e9..6ea72715b5 100644
+--- a/cMake/FreeCAD_Helpers/PrintFinalReport.cmake
++++ b/cMake/FreeCAD_Helpers/PrintFinalReport.cmake
+@@ -124,6 +124,7 @@ macro(PrintFinalReport)
+     value(BUILD_MEASURE)
+     value(BUILD_TECHDRAW)
+     value(BUILD_TEST)
++    value(BUILD_DOCUMENTATION)
+     value(BUILD_TUX)
+     value(BUILD_WEB)
+     value(CMAKE_INSTALL_PREFIX)
+diff --git a/cMake/FreeCAD_Helpers/SetupQt.cmake b/cMake/FreeCAD_Helpers/SetupQt.cmake
+index f536efb4a3..a347bd3b16 100644
+--- a/cMake/FreeCAD_Helpers/SetupQt.cmake
++++ b/cMake/FreeCAD_Helpers/SetupQt.cmake
+@@ -19,6 +19,24 @@ if (ENABLE_DEVELOPER_TESTS)
+     list (APPEND FREECAD_QT_COMPONENTS Test)
+ endif ()
+ 
++# Qt PDF for the native PDF viewer (optional).
++# Pdf gives QPdfDocument/QPdfSearchModel, PdfWidgets gives the QPdfView widget.
++# 6.4 is the floor: QPdfPageNavigator and QPdfLink arrived in that release.
++# Asking find_package for it means older Qt6 simply leaves QtPdf_FOUND false
++# and the viewer compiles away.  QPdfView's search highlighting needs 6.5 and
++# is guarded in PdfView.cpp.
++if(BUILD_GUI AND FREECAD_QT_MAJOR_VERSION EQUAL 6)
++    find_package(Qt6 6.4 QUIET COMPONENTS Pdf PdfWidgets)
++    if(Qt6Pdf_FOUND AND Qt6PdfWidgets_FOUND)
++        set(QtPdf_LIBRARIES Qt6::Pdf Qt6::PdfWidgets)
++        set(QtPdf_FOUND TRUE)
++        message(STATUS "Qt6::Pdf and Qt6::PdfWidgets found - PDF opens in a native viewer with text selection and search")
++    else()
++        set(QtPdf_FOUND FALSE)
++        message(STATUS "Qt6::PdfWidgets >= 6.4 not found - PDF falls back to raster image loading")
++    endif()
++endif()
++
+ foreach(COMPONENT IN LISTS FREECAD_QT_COMPONENTS)
+     find_package(Qt${FREECAD_QT_MAJOR_VERSION} REQUIRED COMPONENTS ${COMPONENT})
+     if(TARGET Qt${FREECAD_QT_MAJOR_VERSION}::${COMPONENT})
+diff --git a/src/Gui/ApplicationPy.cpp b/src/Gui/ApplicationPy.cpp
+index 589bb5ba26..424f625afe 100644
+--- a/src/Gui/ApplicationPy.cpp
++++ b/src/Gui/ApplicationPy.cpp
+@@ -908,6 +908,7 @@ PyObject* ApplicationPy::sExport(PyObject* /*self*/, PyObject* args)
+                     printer.setOutputFileName(fileName);
+                     printer.setCreator(QString::fromStdString(App::Application::getNameWithVersion()));
+                     view->print(&printer);
++                    Gui::MDIView::offerToAttachExport(fileName);
+                 }
+             }
+         }
+diff --git a/src/Gui/CMakeLists.txt b/src/Gui/CMakeLists.txt
+index aabf5f6830..40d84fdfa7 100644
+--- a/src/Gui/CMakeLists.txt
++++ b/src/Gui/CMakeLists.txt
+@@ -1201,6 +1201,7 @@ SET(View_CPP_SRCS
+     MDIViewWithCamera.cpp
+     GraphvizView.cpp
+     ImageView.cpp
++    PdfView.cpp
+     ActiveObjectList.cpp
+ )
+ SET(View_HPP_SRCS
+@@ -1210,6 +1211,7 @@ SET(View_HPP_SRCS
+     MDIViewWithCamera.h
+     GraphvizView.h
+     ImageView.h
++    PdfView.h
+     ActiveObjectList.h
+ )
+ SET(View_SRCS
+@@ -1480,6 +1482,12 @@ endif ()
+ target_sources(FreeCADGui PRIVATE ${FreeCADGui_SRCS})
+ target_link_libraries(FreeCADGui PUBLIC ${FreeCADGui_LIBS})
+ 
++# Native PDF viewer (QPdfView + QPdfSearchModel)
++if(QtPdf_FOUND)
++    target_link_libraries(FreeCADGui PUBLIC ${QtPdf_LIBRARIES})
++    target_compile_definitions(FreeCADGui PRIVATE HAVE_QT_PDF_WIDGETS)
++endif()
++
+ if (MSVC)
+     target_compile_definitions(FreeCADGui PRIVATE WIN32_LEAN_AND_MEAN)
+     target_compile_options(FreeCADGui PRIVATE /wd4251 /wd4273 /wd4275)
+diff --git a/src/Gui/EditorView.cpp b/src/Gui/EditorView.cpp
+index d433a7c5a0..c6ee5296a3 100644
+--- a/src/Gui/EditorView.cpp
++++ b/src/Gui/EditorView.cpp
+@@ -535,6 +535,7 @@ void EditorView::printPdf()
+         printer.setOutputFileName(filename);
+         printer.setCreator(QString::fromStdString(App::Application::getNameWithVersion()));
+         d->textEdit->document()->print(&printer);
++        offerToAttachExport(filename);
+     }
+ }
+ 
+diff --git a/src/Gui/FileHandler.cpp b/src/Gui/FileHandler.cpp
+index 110a1da4fa..af56ae3d04 100644
+--- a/src/Gui/FileHandler.cpp
++++ b/src/Gui/FileHandler.cpp
+@@ -33,6 +33,9 @@
+ #include "BitmapFactory.h"
+ #include "CommandT.h"
+ #include "EditorView.h"
++#ifdef HAVE_QT_PDF_WIDGETS
++#include "PdfView.h"
++#endif
+ #include "PythonEditor.h"
+ #include "MainWindow.h"
+ #include <App/Application.h>
+@@ -146,6 +149,15 @@ bool FileHandler::openInternal()
+         return true;
+     }
+ 
++#ifdef HAVE_QT_PDF_WIDGETS
++    // Open PDF in the native viewer rather than rasterising it, so the text
++    // stays searchable.
++    if (hasExtension(QStringList() << QLatin1String("pdf"))) {
++        openPdf();
++        return true;
++    }
++#endif
++
+     QStringList supportedFormats;
+     auto imageFormats = QImageReader::supportedImageFormats();
+     std::transform(
+@@ -205,6 +217,19 @@ void FileHandler::openImage()
+     openInternal("Image::ImagePlane", "ImageFile");
+ }
+ 
++#ifdef HAVE_QT_PDF_WIDGETS
++void FileHandler::openPdf()
++{
++    auto* view = new PdfView(getMainWindow());
++    if (!view->loadFile(filename)) {
++        delete view;
++        return;
++    }
++    view->resize(700, 850);
++    getMainWindow()->addWindow(view);
++}
++#endif
++
+ void FileHandler::openPython()
+ {
+     auto editor = new PythonEditor();
+diff --git a/src/Gui/FileHandler.h b/src/Gui/FileHandler.h
+index af64af4835..6e4a73af9b 100644
+--- a/src/Gui/FileHandler.h
++++ b/src/Gui/FileHandler.h
+@@ -52,6 +52,9 @@ private:
+     void openInventor();
+     void openVRML();
+     void openImage();
++#ifdef HAVE_QT_PDF_WIDGETS
++    void openPdf();
++#endif
+     void openPython();
+ 
+ private:
+diff --git a/src/Gui/GraphvizView.cpp b/src/Gui/GraphvizView.cpp
+index e07b69706d..71ab433776 100644
+--- a/src/Gui/GraphvizView.cpp
++++ b/src/Gui/GraphvizView.cpp
+@@ -365,6 +365,9 @@ void GraphvizView::convertDotFinished()
+                 file.write(data);
+                 file.close();
+                 running = ProcessType::None;
++                if (runningExportType == QLatin1String("pdf")) {
++                    offerToAttachExport(runningExportPath);
++                }
+             }
+         }
+     }
+diff --git a/src/Gui/MDIView.cpp b/src/Gui/MDIView.cpp
+index ca3eec8cdb..3fbbf6bc44 100644
+--- a/src/Gui/MDIView.cpp
++++ b/src/Gui/MDIView.cpp
+@@ -35,6 +35,7 @@
+ #include <QRegularExpressionMatch>
+ 
+ #include <Base/Interpreter.h>
++#include <Base/Tools.h>
+ #include <App/Document.h>
+ #include <App/Application.h>
+ #include <Gui/PreferencePages/DlgSettingsPDF.h>
+@@ -296,6 +297,31 @@ void MDIView::printPdf()
+         printer.setOutputFileName(filename);
+         printer.setCreator(QString::fromStdString(App::Application::getNameWithVersion()));
+         print(&printer);
++        offerToAttachExport(filename);
++    }
++}
++
++void MDIView::offerToAttachExport(const QString& filename)
++{
++    // Let the Documentation module offer to keep the export with the model.
++    // It decides whether the user still wants to be asked, and this does
++    // nothing at all when the module is missing.
++    if (filename.isEmpty()) {
++        return;
++    }
++
++    // Escaped so that backslashes in Windows paths and quotes in folder
++    // names survive being put into a Python string literal.
++    const std::string path = Base::Tools::escapeEncodeString(filename.toUtf8().constData());
++    try {
++        Base::Interpreter().runStringArg(
++            "import DocumentationCommands\n"
++            "DocumentationCommands.offerToAttachExport('%s')",
++            path.c_str()
++        );
++    }
++    catch (const Base::PyException&) {
++        // Module missing or disabled - exporting still succeeded.
+     }
+ }
+ 
+diff --git a/src/Gui/MDIView.h b/src/Gui/MDIView.h
+index ea9d471db0..6cc05fbcf2 100644
+--- a/src/Gui/MDIView.h
++++ b/src/Gui/MDIView.h
+@@ -99,6 +99,11 @@ public:
+     virtual void print();
+     /** Print to PDF file */
+     virtual void printPdf();
++    /** Offer to attach a just-exported file to the document.
++     *  Static so exporters that do not go through printPdf() - TechDraw
++     *  writes its pages itself - can offer the same thing.
++     */
++    static void offerToAttachExport(const QString& filename);
+     /** Show a preview dialog */
+     virtual void printPreview();
+     /** Save the printer configuration */
+diff --git a/src/Gui/PdfView.cpp b/src/Gui/PdfView.cpp
+new file mode 100644
+index 0000000000..69eb46a36f
+--- /dev/null
++++ b/src/Gui/PdfView.cpp
+@@ -0,0 +1,1454 @@
++// SPDX-License-Identifier: LGPL-2.1-or-later
++
++/***************************************************************************
++ *   Copyright (c) 2026 FreeCAD Project Association                        *
++ *                                                                         *
++ *   This file is part of FreeCAD.                                         *
++ *                                                                         *
++ *   FreeCAD is free software: you can redistribute it and/or modify it    *
++ *   under the terms of the GNU Lesser General Public License as           *
++ *   published by the Free Software Foundation, either version 2.1 of the  *
++ *   License, or (at your option) any later version.                       *
++ *                                                                         *
++ *   FreeCAD is distributed in the hope that it will be useful, but        *
++ *   WITHOUT ANY WARRANTY; without even the implied warranty of            *
++ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU      *
++ *   Lesser General Public License for more details.                       *
++ *                                                                         *
++ *   You should have received a copy of the GNU Lesser General Public      *
++ *   License along with FreeCAD. If not, see                               *
++ *   <https://www.gnu.org/licenses/>.                                      *
++ *                                                                         *
++ ***************************************************************************/
++
++#ifdef HAVE_QT_PDF_WIDGETS
++
++#include <QAction>
++#include <QApplication>
++#include <QClipboard>
++#include <QDir>
++#include <QFileDialog>
++#include <QFileInfo>
++#include <QGuiApplication>
++#include <QHBoxLayout>
++#include <QLabel>
++#include <QLineEdit>
++#include <QMessageBox>
++#include <QMouseEvent>
++#include <QPagedPaintDevice>
++#include <QPainter>
++#include <QPrinter>
++#include <QProcess>
++#include <QPushButton>
++#include <QScreen>
++#include <QScrollBar>
++#include <QStandardPaths>
++#include <QTemporaryDir>
++#include <QTimer>
++#include <QToolButton>
++#include <QVBoxLayout>
++#include <QtMath>
++
++#include <QHeaderView>
++#include <QSplitter>
++#include <QTreeView>
++
++#include <QPdfBookmarkModel>
++#include <QPdfDocument>
++#include <QPdfPageNavigator>
++#include <QPdfSearchModel>
++#include <QPdfSelection>
++#include <QPdfView>
++
++#include <cmath>
++
++#include <Base/Exception.h>
++#include <Base/Interpreter.h>
++#include <App/Application.h>
++#include <App/Document.h>
++#include <Base/Tools.h>
++
++#include "PdfView.h"
++#include "BitmapFactory.h"
++#include "Command.h"
++#include "CommandT.h"
++#include "Document.h"
++#include "FileDialog.h"
++
++using namespace Gui;
++
++namespace
++{
++// QPdfView zoom is a plain factor; keep it inside sane bounds.
++constexpr qreal ZoomStep = 1.25;
++constexpr qreal ZoomMin = 0.1;
++constexpr qreal ZoomMax = 10.0;
++// Resolution range used when pages are rasterised for printing.
++constexpr int MinPrintDpi = 200;
++constexpr int MaxPrintDpi = 300;
++}  // namespace
++
++// ----------------------------------------------------------------------------
++// PdfSelectionView
++// ----------------------------------------------------------------------------
++
++PdfSelectionView::PdfSelectionView(QWidget* parent)
++    : QPdfView(parent)
++{
++    // Move events are only needed while a button is held, so mouse tracking
++    // stays off.
++    viewport()->setCursor(Qt::IBeamCursor);
++}
++
++void PdfSelectionView::visiblePageRange(int& first, int& last) const
++{
++    QPdfDocument* doc = document();
++    const int count = doc ? doc->pageCount() : 0;
++
++    if (count < 1) {
++        first = last = -1;
++        return;
++    }
++
++    if (pageMode() == QPdfView::PageMode::SinglePage) {
++        first = last = pageNavigator() ? pageNavigator()->currentPage() : 0;
++    }
++    else {
++        first = 0;
++        last = count - 1;
++    }
++}
++
++void PdfSelectionView::ensureLayout() const
++{
++    QPdfDocument* doc = document();
++    if (!doc || doc->status() != QPdfDocument::Status::Ready) {
++        invalidateLayout();
++        return;
++    }
++
++    int first = -1;
++    int last = -1;
++    visiblePageRange(first, last);
++
++    const QSize viewportSize = viewport()->size();
++    const bool stillValid = !layoutCache.isEmpty() && cachedFirst == first && cachedLast == last
++        && cachedViewport == viewportSize && cachedZoomMode == zoomMode()
++        && qFuzzyCompare(cachedZoom, zoomFactor());
++    if (stillValid) {
++        return;
++    }
++
++    layoutCache.clear();
++    scaleCache.clear();
++    cachedFirst = first;
++    cachedLast = last;
++    cachedViewport = viewportSize;
++    cachedZoomMode = zoomMode();
++    cachedZoom = zoomFactor();
++
++    if (first < 0) {
++        return;
++    }
++
++    // Mirrors QPdfViewPrivate::calculateDocumentLayout() (Qt 6.4 - 6.8): page
++    // sizes are rounded to whole pixels, the fit modes scale every page on its
++    // own, and pages are centred in the wider of the document and the viewport.
++    const qreal screenResolution = QGuiApplication::primaryScreen()->logicalDotsPerInch() / 72.0;
++    const QMargins margins = documentMargins();
++    const int spacing = pageSpacing();
++
++    QList<QSize> sizes;
++    sizes.reserve(last - first + 1);
++    scaleCache.reserve(last - first + 1);
++    int totalWidth = 0;
++    for (int i = first; i <= last; ++i) {
++        const QSizeF points = doc->pagePointSize(i);
++        QSize size;
++        qreal zoom = zoomFactor();
++        switch (zoomMode()) {
++            case QPdfView::ZoomMode::Custom:
++                size = (points * screenResolution * zoom).toSize();
++                break;
++            case QPdfView::ZoomMode::FitToWidth: {
++                size = (points * screenResolution).toSize();
++                zoom = size.width() > 0
++                    ? qreal(viewportSize.width() - margins.left() - margins.right()) / size.width()
++                    : 0.0;
++                size *= zoom;
++                break;
++            }
++            case QPdfView::ZoomMode::FitInView: {
++                const QSize avail = viewportSize
++                    + QSize(-margins.left() - margins.right(), -spacing);
++                size = (points * screenResolution).toSize();
++                const QSize scaled = size.scaled(avail, Qt::KeepAspectRatio);
++                zoom = size.width() > 0 ? qreal(scaled.width()) / size.width() : 0.0;
++                size = scaled;
++                break;
++            }
++        }
++        totalWidth = qMax(totalWidth, size.width());
++        sizes.append(size);
++        // Pixels per point for this page, which is what turns page points
++        // into viewport pixels and back.
++        scaleCache.append(points.width() > 0 ? size.width() / points.width() : 0.0);
++    }
++    totalWidth += margins.left() + margins.right();
++
++    layoutCache.reserve(sizes.size());
++    int y = margins.top();
++    for (const QSize& size : std::as_const(sizes)) {
++        const int x = (qMax(totalWidth, viewportSize.width()) - size.width()) / 2;
++        layoutCache.append(QRectF(x, y, size.width(), size.height()));
++        y += size.height() + spacing;
++    }
++}
++
++qreal PdfSelectionView::pageScale(int page) const
++{
++    ensureLayout();
++    const int index = page - cachedFirst;
++    if (cachedFirst < 0 || index < 0 || index >= scaleCache.size()) {
++        return 0.0;
++    }
++    return scaleCache.at(index);
++}
++
++qreal PdfSelectionView::effectiveZoom() const
++{
++    if (zoomMode() == QPdfView::ZoomMode::Custom) {
++        return zoomFactor();
++    }
++
++    // In the fit modes zoomFactor() still holds the last custom value, so
++    // work the real one out from how large the current page came out.
++    const int page = pageNavigator() ? pageNavigator()->currentPage() : 0;
++    const qreal screenResolution = QGuiApplication::primaryScreen()->logicalDotsPerInch() / 72.0;
++    const qreal scale = pageScale(page);
++    return scale > 0.0 ? scale / screenResolution : zoomFactor();
++}
++
++QRectF PdfSelectionView::pageRect(int page) const
++{
++    ensureLayout();
++
++    const int index = page - cachedFirst;
++    if (cachedFirst < 0 || index < 0 || index >= layoutCache.size()) {
++        return {};
++    }
++
++    QRectF rect = layoutCache.at(index);
++    rect.translate(-horizontalScrollBar()->value(), -verticalScrollBar()->value());
++    return rect;
++}
++
++bool PdfSelectionView::mapToPage(const QPointF& pos, int& page, QPointF& pagePos) const
++{
++    ensureLayout();
++
++    if (cachedFirst < 0) {
++        return false;
++    }
++
++    for (int i = cachedFirst; i <= cachedLast; ++i) {
++        const QRectF rect = pageRect(i);
++        const qreal scale = pageScale(i);
++        if (rect.isNull() || scale <= 0.0 || !rect.contains(pos)) {
++            continue;
++        }
++        page = i;
++        pagePos = (pos - rect.topLeft()) / scale;
++        return true;
++    }
++
++    return false;
++}
++
++void PdfSelectionView::updateSelection(const QPointF& to)
++{
++    QPdfDocument* doc = document();
++    if (!doc || anchorPage < 0) {
++        return;
++    }
++
++    int page = -1;
++    QPointF pagePos;
++    if (!mapToPage(to, page, pagePos) || page != anchorPage) {
++        // Dragging off the anchor page: keep what we have. A selection cannot
++        // span pages, and neither can a crop region.
++        return;
++    }
++
++    if (mode == DragMode::SelectText) {
++        selection = doc->getSelection(anchorPage, anchorPos, pagePos);
++        Q_EMIT selectionChanged(selectedText());
++    }
++    else {
++        region = QRectF(anchorPos, pagePos).normalized();
++        Q_EMIT regionChanged(!region.isEmpty());
++    }
++
++    viewport()->update();
++}
++
++QString PdfSelectionView::selectedText() const
++{
++    return selection.has_value() && selection->isValid() ? selection->text() : QString();
++}
++
++void PdfSelectionView::selectAllOnCurrentPage()
++{
++    QPdfDocument* doc = document();
++    if (!doc || doc->pageCount() < 1) {
++        return;
++    }
++
++    anchorPage = pageNavigator() ? pageNavigator()->currentPage() : 0;
++    selection = doc->getAllText(anchorPage);
++    viewport()->update();
++    Q_EMIT selectionChanged(selectedText());
++}
++
++void PdfSelectionView::clearSelection()
++{
++    selection.reset();
++    anchorPage = -1;
++    viewport()->update();
++    Q_EMIT selectionChanged(QString());
++}
++
++void PdfSelectionView::setDragMode(DragMode newMode)
++{
++    if (mode == newMode) {
++        return;
++    }
++
++    mode = newMode;
++    viewport()->setCursor(mode == DragMode::SelectText ? Qt::IBeamCursor
++                                                       : Qt::CrossCursor);
++    clearSelection();
++    clearRegion();
++}
++
++void PdfSelectionView::invalidateLayout() const
++{
++    layoutCache.clear();
++    scaleCache.clear();
++    cachedFirst = -1;
++    cachedLast = -1;
++    cachedViewport = {};
++}
++
++void PdfSelectionView::clearRegion()
++{
++    region = {};
++    regionPageIndex = -1;
++    viewport()->update();
++    Q_EMIT regionChanged(false);
++}
++
++void PdfSelectionView::mousePressEvent(QMouseEvent* event)
++{
++    if (event->button() != Qt::LeftButton) {
++        QPdfView::mousePressEvent(event);
++        return;
++    }
++
++    int page = -1;
++    QPointF pagePos;
++    if (mapToPage(event->position(), page, pagePos)) {
++        anchorPage = page;
++        anchorPos = pagePos;
++        dragging = true;
++
++        if (mode == DragMode::SelectText) {
++            selection.reset();
++            Q_EMIT selectionChanged(QString());
++        }
++        else {
++            region = {};
++            regionPageIndex = page;
++            Q_EMIT regionChanged(false);
++        }
++
++        viewport()->update();
++        event->accept();
++        return;
++    }
++
++    QPdfView::mousePressEvent(event);
++}
++
++void PdfSelectionView::mouseMoveEvent(QMouseEvent* event)
++{
++    if (dragging) {
++        updateSelection(event->position());
++        event->accept();
++        return;
++    }
++
++    QPdfView::mouseMoveEvent(event);
++}
++
++void PdfSelectionView::mouseReleaseEvent(QMouseEvent* event)
++{
++    if (dragging && event->button() == Qt::LeftButton) {
++        updateSelection(event->position());
++        dragging = false;
++        event->accept();
++        return;
++    }
++
++    QPdfView::mouseReleaseEvent(event);
++}
++
++void PdfSelectionView::paintEvent(QPaintEvent* event)
++{
++    QPdfView::paintEvent(event);
++
++    if (mode == DragMode::SelectRegion) {
++        paintRegion();
++        return;
++    }
++
++    if (!selection.has_value() || !selection->isValid()) {
++        return;
++    }
++
++    const QRectF rect = pageRect(anchorPage);
++    if (rect.isNull()) {
++        return;
++    }
++
++    const qreal scale = pageScale(anchorPage);
++    if (scale <= 0.0) {
++        return;
++    }
++
++    QPainter painter(viewport());
++    painter.setRenderHint(QPainter::Antialiasing);
++
++    QColor highlight = palette().highlight().color();
++    highlight.setAlpha(90);
++    painter.setPen(Qt::NoPen);
++    painter.setBrush(highlight);
++
++    // QPdfSelection reports its geometry in page points, so scale and shift
++    // it into the viewport the same way the page itself was placed.
++    for (const QPolygonF& bound : selection->bounds()) {
++        QPolygonF mapped;
++        mapped.reserve(bound.size());
++        for (const QPointF& point : bound) {
++            mapped.append(rect.topLeft() + point * scale);
++        }
++        painter.drawPolygon(mapped);
++    }
++}
++
++void PdfSelectionView::paintRegion()
++{
++    if (region.isEmpty() || regionPageIndex < 0) {
++        return;
++    }
++
++    const QRectF page = pageRect(regionPageIndex);
++    if (page.isNull()) {
++        return;
++    }
++
++    const qreal scale = pageScale(regionPageIndex);
++    if (scale <= 0.0) {
++        return;
++    }
++
++    const QRectF onScreen(page.topLeft() + region.topLeft() * scale,
++                          region.size() * scale);
++
++    QPainter painter(viewport());
++    QColor accent = palette().highlight().color();
++
++    painter.setPen(QPen(accent, 1, Qt::DashLine));
++    QColor fill = accent;
++    fill.setAlpha(50);
++    painter.setBrush(fill);
++    painter.drawRect(onScreen);
++}
++
++
++// ----------------------------------------------------------------------------
++// PdfView
++// ----------------------------------------------------------------------------
++
++PdfView::PdfView(QWidget* parent)
++    : MDIView(nullptr, parent)
++    , pdfDocument(new QPdfDocument(this))
++    , searchModel(new QPdfSearchModel(this))
++    , pdfView(new PdfSelectionView(this))
++{
++    setupUi();
++    setupActions();
++
++    bookmarkModel = new QPdfBookmarkModel(this);
++    bookmarkModel->setDocument(pdfDocument);
++    bookmarkView->setModel(bookmarkModel);
++    connect(bookmarkView, &QTreeView::activated, this, &PdfView::onBookmarkActivated);
++
++    // The model fills in after load() has already returned, so wait to be
++    // told rather than asking once and hiding the panel for good.
++    connect(bookmarkModel, &QAbstractItemModel::modelReset,
++            this, &PdfView::updateBookmarkPanel);
++    connect(bookmarkModel, &QAbstractItemModel::rowsInserted,
++            this, &PdfView::updateBookmarkPanel);
++    connect(pdfDocument, &QPdfDocument::statusChanged,
++            this, &PdfView::updateBookmarkPanel);
++    connect(bookmarkModel, &QPdfBookmarkModel::documentChanged,
++            this, &PdfView::updateBookmarkPanel);
++
++    searchModel->setDocument(pdfDocument);
++    // The search model works through the pages on a timer, so results keep
++    // arriving after setSearchString() has returned.
++    connect(searchModel, &QAbstractItemModel::rowsInserted, this, &PdfView::onSearchResultsChanged);
++    connect(searchModel, &QAbstractItemModel::modelReset, this, &PdfView::onSearchResultsChanged);
++    pdfView->setDocument(pdfDocument);
++    pdfView->invalidateLayout();
++#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
++    // Highlighting matches on the page needs Qt 6.5; with 6.4 search still
++    // finds and jumps to them.
++    pdfView->setSearchModel(searchModel);
++#endif
++    pdfView->setPageMode(QPdfView::PageMode::MultiPage);
++
++    connect(pdfView->pageNavigator(), &QPdfPageNavigator::currentPageChanged,
++            this, &PdfView::onPageChanged);
++
++    setWindowIcon(Gui::BitmapFactory().pixmap("document-open"));
++}
++
++PdfView::~PdfView()
++{
++    // ~QWidget deletes the children before ~QObject drops the connections,
++    // and QPdfDocument emits statusChanged() while it closes. Without this
++    // the slots below would run on a view that is already half destroyed.
++    pdfDocument->disconnect(this);
++    searchModel->disconnect(this);
++    bookmarkModel->disconnect(this);
++    pdfView->pageNavigator()->disconnect(this);
++}
++
++void PdfView::setupUi()
++{
++    auto* toolBar = new QHBoxLayout();
++
++    searchEdit = new QLineEdit(this);
++    searchEdit->setClearButtonEnabled(true);
++    searchEdit->setMaximumWidth(300);
++
++    prevButton = new QToolButton(this);
++    prevButton->setText(QStringLiteral("\u25c0"));
++    prevButton->setEnabled(false);
++
++    nextButton = new QToolButton(this);
++    nextButton->setText(QStringLiteral("\u25b6"));
++    nextButton->setEnabled(false);
++
++    resultLabel = new QLabel(this);
++
++    // Page navigation
++    prevPageButton = new QToolButton(this);
++    prevPageButton->setText(QStringLiteral("\u25c0"));
++
++    nextPageButton = new QToolButton(this);
++    nextPageButton->setText(QStringLiteral("\u25b6"));
++
++    pageLabel = new QLabel(this);
++    selectionLabel = new QLabel(this);
++
++    bookmarkButton = new QToolButton(this);
++    bookmarkButton->setText(QStringLiteral("\u2630"));
++    bookmarkButton->setCheckable(true);
++    bookmarkButton->setEnabled(false);
++
++    regionButton = new QToolButton(this);
++    regionButton->setText(QStringLiteral("\u2b1a"));
++    regionButton->setCheckable(true);
++
++    zoomOutButton = new QToolButton(this);
++    zoomOutButton->setText(QStringLiteral("\u2212"));
++
++    zoomInButton = new QToolButton(this);
++    zoomInButton->setText(QStringLiteral("+"));
++
++    zoomFitButton = new QToolButton(this);
++    zoomFitButton->setText(QStringLiteral("\u2194"));
++
++    toolBar->addWidget(bookmarkButton);
++    toolBar->addWidget(searchEdit);
++    toolBar->addWidget(prevButton);
++    toolBar->addWidget(nextButton);
++    toolBar->addWidget(resultLabel);
++    toolBar->addSpacing(16);
++    toolBar->addWidget(prevPageButton);
++    toolBar->addWidget(pageLabel);
++    toolBar->addWidget(nextPageButton);
++    toolBar->addStretch(1);
++    toolBar->addWidget(selectionLabel);
++    toolBar->addWidget(regionButton);
++    toolBar->addWidget(zoomOutButton);
++    toolBar->addWidget(zoomInButton);
++    toolBar->addWidget(zoomFitButton);
++
++    // Table of contents on the left. Paging through a long catalogue to
++    // find one drawing is no fun, and most of them have bookmarks anyway.
++    bookmarkView = new QTreeView(this);
++    bookmarkView->setHeaderHidden(true);
++    bookmarkView->setMinimumWidth(160);
++    bookmarkView->setVisible(false);
++
++    splitter = new QSplitter(Qt::Horizontal, this);
++    splitter->addWidget(bookmarkView);
++    splitter->addWidget(pdfView);
++    splitter->setStretchFactor(0, 0);
++    splitter->setStretchFactor(1, 1);
++    splitter->setSizes({200, 800});
++
++    auto* central = new QWidget(this);
++    auto* layout = new QVBoxLayout(central);
++    layout->setContentsMargins(0, 0, 0, 0);
++    layout->addLayout(toolBar);
++    layout->addWidget(splitter);
++    setCentralWidget(central);
++
++    retranslateUi();
++
++    connect(zoomInButton, &QToolButton::clicked, this, &PdfView::onZoomIn);
++    connect(zoomOutButton, &QToolButton::clicked, this, &PdfView::onZoomOut);
++    connect(zoomFitButton, &QToolButton::clicked, this, &PdfView::onZoomReset);
++    connect(prevPageButton, &QToolButton::clicked, this, &PdfView::onPrevPage);
++    connect(nextPageButton, &QToolButton::clicked, this, &PdfView::onNextPage);
++}
++
++void PdfView::setupActions()
++{
++    connect(searchEdit, &QLineEdit::textChanged, this, &PdfView::onSearchTextChanged);
++    connect(searchEdit, &QLineEdit::returnPressed, this, &PdfView::onFindNext);
++    connect(nextButton, &QToolButton::clicked, this, &PdfView::onFindNext);
++    connect(prevButton, &QToolButton::clicked, this, &PdfView::onFindPrevious);
++
++    // The key sequences on these actions are only there to show up in the
++    // context menu. Ctrl+C and Ctrl+A also belong to Std_Copy and
++    // Std_SelectAll, and two live shortcuts for one key cancel each other
++    // out, so the keys themselves are taken in event() and keyPressEvent().
++    copyAction = new QAction(this);
++    copyAction->setShortcut(QKeySequence::Copy);
++    copyAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
++    connect(copyAction, &QAction::triggered, this, &PdfView::onCopySelection);
++    addAction(copyAction);
++
++    selectPageAction = new QAction(this);
++    selectPageAction->setShortcut(QKeySequence::SelectAll);
++    selectPageAction->setShortcutContext(Qt::WidgetWithChildrenShortcut);
++    connect(selectPageAction, &QAction::triggered, pdfView,
++            &PdfSelectionView::selectAllOnCurrentPage);
++    addAction(selectPageAction);
++
++    copyPageAction = new QAction(this);
++    connect(copyPageAction, &QAction::triggered, this, &PdfView::onCopyPageText);
++    addAction(copyPageAction);
++
++    copyAllAction = new QAction(this);
++    connect(copyAllAction, &QAction::triggered, this, &PdfView::onCopyAllText);
++    addAction(copyAllAction);
++
++    insertRegionAction = new QAction(this);
++    insertRegionAction->setEnabled(false);
++    connect(insertRegionAction, &QAction::triggered,
++            this, &PdfView::onInsertRegionAsImagePlane);
++    addAction(insertRegionAction);
++
++    importVectorsAction = new QAction(this);
++    importVectorsAction->setEnabled(false);
++    connect(importVectorsAction, &QAction::triggered,
++            this, &PdfView::onImportRegionAsVectors);
++    addAction(importVectorsAction);
++
++    connect(pdfView, &PdfSelectionView::selectionChanged,
++            this, &PdfView::onSelectionChanged);
++    connect(pdfView, &PdfSelectionView::regionChanged,
++            this, &PdfView::onRegionChanged);
++    connect(regionButton, &QToolButton::toggled,
++            this, &PdfView::onDragModeToggled);
++    connect(bookmarkButton, &QToolButton::toggled, this, [this](bool on) {
++        bookmarkView->setVisible(on);
++    });
++
++    setContextMenuPolicy(Qt::ActionsContextMenu);
++
++    retranslateActions();
++}
++
++void PdfView::retranslateActions()
++{
++    copyAction->setText(tr("Copy"));
++    selectPageAction->setText(tr("Select all on page"));
++    copyPageAction->setText(tr("Copy page text"));
++    copyAllAction->setText(tr("Copy all text"));
++    insertRegionAction->setText(tr("Insert region as image plane"));
++    importVectorsAction->setText(tr("Import region as vector shapes"));
++    importVectorsAction->setToolTip(
++        tr("Extract the vector paths in the region with pdftocairo and import them\n"
++           "through the SVG importer. Requires poppler-utils (pdftocairo)."));
++}
++
++bool PdfView::event(QEvent* event)
++{
++    // Claim the keys that Std_Copy, Std_SelectAll and friends are bound to
++    // while the focus is inside this view; they then arrive as plain key
++    // presses instead of being lost as ambiguous shortcuts.
++    if (event->type() == QEvent::ShortcutOverride) {
++        auto* key = static_cast<QKeyEvent*>(event);
++        if (key->matches(QKeySequence::Copy) || key->matches(QKeySequence::SelectAll)
++            || key->matches(QKeySequence::Find)) {
++            key->accept();
++            return true;
++        }
++    }
++    return MDIView::event(event);
++}
++
++void PdfView::keyPressEvent(QKeyEvent* event)
++{
++    if (event->matches(QKeySequence::Copy)) {
++        onCopySelection();
++    }
++    else if (event->matches(QKeySequence::SelectAll)) {
++        pdfView->selectAllOnCurrentPage();
++    }
++    else if (event->matches(QKeySequence::Find)) {
++        searchEdit->setFocus();
++        searchEdit->selectAll();
++    }
++    else {
++        MDIView::keyPressEvent(event);
++        return;
++    }
++    event->accept();
++}
++
++bool PdfView::loadFile(const QString& fileName)
++{
++    const QPdfDocument::Error error = pdfDocument->load(fileName);
++
++    if (error != QPdfDocument::Error::None) {
++        QString reason;
++        switch (error) {
++            case QPdfDocument::Error::FileNotFound:
++                reason = tr("The file was not found.");
++                break;
++            case QPdfDocument::Error::InvalidFileFormat:
++                reason = tr("The file is not a valid PDF document.");
++                break;
++            case QPdfDocument::Error::IncorrectPassword:
++                reason = tr("The document is password protected.");
++                break;
++            case QPdfDocument::Error::UnsupportedSecurityScheme:
++                reason = tr("The document uses an unsupported security scheme.");
++                break;
++            default:
++                reason = tr("The document could not be read.");
++                break;
++        }
++
++        QMessageBox::information(this, tr("Failed to load PDF"), reason);
++        return false;
++    }
++
++    setWindowFilePath(fileName);
++    pdfView->invalidateLayout();
++    updateResultLabel();
++    updatePageLabel();
++
++    updateBookmarkPanel();
++    return true;
++}
++
++int PdfView::pageCount() const
++{
++    return pdfDocument ? pdfDocument->pageCount() : 0;
++}
++
++QString PdfView::allText() const
++{
++    QStringList pages;
++    const int count = pageCount();
++    pages.reserve(count);
++
++    for (int page = 0; page < count; ++page) {
++        const QPdfSelection selection = pdfDocument->getAllText(page);
++        if (selection.isValid()) {
++            pages.append(selection.text());
++        }
++    }
++
++    return pages.join(QLatin1Char('\n'));
++}
++
++void PdfView::updateBookmarkPanel()
++{
++    // setupUi() ends with retranslateUi(), which reaches this before the
++    // constructor has built the model.
++    if (!bookmarkModel || !bookmarkButton || !bookmarkView) {
++        return;
++    }
++
++    const bool hasBookmarks = bookmarkModel->rowCount({}) > 0;
++    const bool hadBookmarks = bookmarkButton->isEnabled();
++
++    // Leave the button in place even with nothing to show, so an empty
++    // table of contents reads as empty rather than as a missing feature.
++    bookmarkButton->setEnabled(hasBookmarks);
++    bookmarkButton->setToolTip(hasBookmarks
++                                   ? tr("Show bookmarks")
++                                   : tr("This document has no bookmarks"));
++
++    if (hasBookmarks) {
++        bookmarkView->expandToDepth(0);
++        // Open the panel when bookmarks first turn up, and only then: this
++        // also runs on a language change and must not undo the user's choice.
++        if (!hadBookmarks) {
++            bookmarkButton->setChecked(true);  // shows the panel too
++        }
++    }
++    else {
++        bookmarkButton->setChecked(false);
++    }
++    bookmarkView->setVisible(bookmarkButton->isChecked());
++}
++
++void PdfView::onBookmarkActivated(const QModelIndex& index)
++{
++    if (!index.isValid()) {
++        return;
++    }
++
++    // Role is a scoped enum; data() takes a plain int.
++    const int page =
++        index.data(static_cast<int>(QPdfBookmarkModel::Role::Page)).toInt();
++    const QPointF location =
++        index.data(static_cast<int>(QPdfBookmarkModel::Role::Location)).toPointF();
++
++    // Many PDFs bookmark a page without saying where on it. Qt returns a
++    // large negative sentinel for those, so fall back to the top of the page
++    // rather than scrolling somewhere meaningless.
++    const bool usable = qIsFinite(location.y()) && qAbs(location.y()) < 1e6;
++    pdfView->pageNavigator()->jump(page, usable ? QPointF(0, location.y()) : QPointF());
++}
++
++void PdfView::retranslateUi()
++{
++    searchEdit->setPlaceholderText(tr("Find in document"));
++    prevButton->setToolTip(tr("Previous match"));
++    nextButton->setToolTip(tr("Next match"));
++    prevPageButton->setToolTip(tr("Previous page"));
++    nextPageButton->setToolTip(tr("Next page"));
++    zoomOutButton->setToolTip(tr("Zoom out"));
++    zoomInButton->setToolTip(tr("Zoom in"));
++    zoomFitButton->setToolTip(tr("Fit width"));
++    regionButton->setToolTip(tr("Drag a rectangle to crop part of the page"));
++
++    // setupUi() gets here before setupActions() has created the actions.
++    if (copyAction) {
++        retranslateActions();
++    }
++
++    updateResultLabel();
++    updatePageLabel();
++    updateBookmarkPanel();  // sets the bookmark button's tooltip
++}
++
++void PdfView::changeEvent(QEvent* event)
++{
++    if (event->type() == QEvent::LanguageChange) {
++        retranslateUi();
++    }
++    MDIView::changeEvent(event);
++}
++
++void PdfView::onPrevPage()
++{
++    auto* nav = pdfView->pageNavigator();
++    if (nav->currentPage() > 0) {
++        nav->jump(nav->currentPage() - 1, {});
++    }
++}
++
++void PdfView::onNextPage()
++{
++    auto* nav = pdfView->pageNavigator();
++    if (nav->currentPage() < pageCount() - 1) {
++        nav->jump(nav->currentPage() + 1, {});
++    }
++}
++
++void PdfView::onPageChanged(int page)
++{
++    Q_UNUSED(page);
++    updatePageLabel();
++}
++
++void PdfView::updatePageLabel()
++{
++    const int count = pageCount();
++    if (count < 1) {
++        pageLabel->clear();
++        prevPageButton->setEnabled(false);
++        nextPageButton->setEnabled(false);
++        return;
++    }
++
++    const int current = pdfView->pageNavigator()->currentPage();
++    pageLabel->setText(tr(" %1 / %2 ").arg(current + 1).arg(count));
++    prevPageButton->setEnabled(current > 0);
++    nextPageButton->setEnabled(current < count - 1);
++}
++
++void PdfView::onSearchTextChanged(const QString& text)
++{
++    currentResult = text.isEmpty() ? -1 : 0;
++    jumpToFirstResult = !text.isEmpty();
++    searchModel->setSearchString(text);
++    onSearchResultsChanged();
++}
++
++void PdfView::onSearchResultsChanged()
++{
++    if (jumpToFirstResult && searchModel->rowCount({}) > 0) {
++        jumpToFirstResult = false;
++        showResult(0);
++    }
++    updateResultLabel();
++}
++
++void PdfView::onFindNext()
++{
++    const int total = searchModel->rowCount({});
++    if (total == 0) {
++        return;
++    }
++
++    currentResult = (currentResult + 1) % total;
++    showResult(currentResult);
++    updateResultLabel();
++}
++
++void PdfView::onFindPrevious()
++{
++    const int total = searchModel->rowCount({});
++    if (total == 0) {
++        return;
++    }
++
++    currentResult = currentResult <= 0 ? total - 1 : currentResult - 1;
++    showResult(currentResult);
++    updateResultLabel();
++}
++
++void PdfView::showResult(int index)
++{
++    const QPdfLink link = searchModel->resultAtIndex(index);
++    if (!link.isValid()) {
++        return;
++    }
++
++    pdfView->pageNavigator()->jump(link.page(), link.location());
++#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
++    pdfView->setCurrentSearchResultIndex(index);
++#endif
++}
++
++void PdfView::updateResultLabel()
++{
++    const int total = searchModel->rowCount({});
++
++    if (searchEdit->text().isEmpty()) {
++        resultLabel->clear();
++    }
++    else if (total == 0) {
++        resultLabel->setText(tr("No matches"));
++    }
++    else {
++        resultLabel->setText(tr("%1 of %2").arg(currentResult + 1).arg(total));
++    }
++
++    prevButton->setEnabled(total > 0);
++    nextButton->setEnabled(total > 0);
++}
++
++QString PdfView::pageText(int page) const
++{
++    if (page < 0 || page >= pageCount()) {
++        return {};
++    }
++
++    const QPdfSelection sel = pdfDocument->getAllText(page);
++    return sel.isValid() ? sel.text() : QString();
++}
++
++void PdfView::onCopySelection()
++{
++    // Fall back to the whole page when nothing is highlighted, so Ctrl+C
++    // still does something useful.
++    const QString text =
++        pdfView->selectedText().isEmpty()
++            ? pageText(pdfView->pageNavigator()->currentPage())
++            : pdfView->selectedText();
++
++    if (!text.isEmpty()) {
++        QApplication::clipboard()->setText(text);
++    }
++}
++
++void PdfView::onSelectionChanged(const QString& text)
++{
++    if (regionButton->isChecked()) {
++        return;
++    }
++    if (text.isEmpty()) {
++        selectionLabel->clear();
++    }
++    else {
++        selectionLabel->setText(tr("%n character(s) selected", "", static_cast<int>(text.size())));
++    }
++}
++
++void PdfView::onDragModeToggled(bool regionMode)
++{
++    pdfView->setDragMode(regionMode ? PdfSelectionView::DragMode::SelectRegion
++                                    : PdfSelectionView::DragMode::SelectText);
++}
++
++void PdfView::onRegionChanged(bool hasRegion)
++{
++    insertRegionAction->setEnabled(hasRegion);
++    importVectorsAction->setEnabled(hasRegion);
++    if (hasRegion) {
++        const QRectF r = pdfView->regionRect();
++        selectionLabel->setText(tr("Region %1 x %2 pt")
++                                    .arg(qRound(r.width()))
++                                    .arg(qRound(r.height())));
++    }
++    else {
++        selectionLabel->clear();
++    }
++}
++
++void PdfView::onInsertRegionAsImagePlane()
++{
++    const int page = pdfView->regionPage();
++    const QRectF region = pdfView->regionRect();
++
++    if (page < 0 || region.isEmpty() || pageCount() < 1) {
++        return;
++    }
++
++    // Render the full page and cut the piece out ourselves.
++    // setScaledClipRect() looks like the right tool but returns a rectangle
++    // that drifts further off the further it is from the page origin, which
++    // left crops offset and stretched. An A4 page at 300 DPI costs about
++    // 35 MB, fine for a one-off.
++    const qreal dpi = 300.0;
++    const qreal scale = dpi / 72.0;
++    const QSizeF pagePoints = pdfDocument->pagePointSize(page);
++    const QSize pagePixels = (pagePoints * scale).toSize();
++
++    const QImage pageImage = pdfDocument->render(page, pagePixels);
++    if (pageImage.isNull()) {
++        QMessageBox::warning(this,
++                             tr("Could not crop"),
++                             tr("Rendering page %1 failed.").arg(page + 1));
++        return;
++    }
++
++    QRect clip(qRound(region.x() * scale),
++               qRound(region.y() * scale),
++               qRound(region.width() * scale),
++               qRound(region.height() * scale));
++    clip = clip.intersected(pageImage.rect());
++
++    if (clip.isEmpty()) {
++        return;
++    }
++
++    QImage image = pageImage.copy(clip);
++    if (image.isNull()) {
++        QMessageBox::warning(this,
++                             tr("Could not crop"),
++                             tr("Cropping the selected region failed."));
++        return;
++    }
++
++    // Pages come back with premultiplied alpha over a transparent
++    // background, which turns black if the alpha is simply dropped. White is
++    // the safe default, but a transparent crop is handy as an overlay.
++    QMessageBox background(this);
++    background.setIcon(QMessageBox::Question);
++    background.setWindowTitle(tr("Background"));
++    background.setText(tr("Keep the page background transparent?"));
++    background.setInformativeText(
++        tr("A transparent background lets the underlay blend with what is\n"
++           "behind it. An opaque one renders the crop on white, which is\n"
++           "what a printed page looks like."));
++    QAbstractButton* keepAlpha =
++        background.addButton(tr("Transparent"), QMessageBox::AcceptRole);
++    QAbstractButton* onWhite =
++        background.addButton(tr("Opaque (white)"), QMessageBox::RejectRole);
++    background.setDefaultButton(qobject_cast<QPushButton*>(onWhite));
++    background.exec();
++
++    if (background.clickedButton() != keepAlpha && image.hasAlphaChannel()) {
++        QImage opaque(image.size(), QImage::Format_RGB32);
++        opaque.fill(Qt::white);
++        QPainter painter(&opaque);
++        painter.drawImage(0, 0, image);
++        painter.end();
++        image = opaque;
++    }
++
++    // Record the resolution, or ImagePlane guesses one and the plane comes
++    // out the wrong physical size.
++    const int dotsPerMeter = qRound(dpi / 25.4 * 1000.0);
++    image.setDotsPerMeterX(dotsPerMeter);
++    image.setDotsPerMeterY(dotsPerMeter);
++
++    // The crop has to live on disk: Image::ImagePlane keeps a path, not the
++    // pixels. Offer to put it next to the document by default.
++    QString suggested = QFileInfo(windowFilePath()).completeBaseName();
++    if (suggested.isEmpty()) {
++        suggested = QStringLiteral("region");
++    }
++    suggested += QStringLiteral("_p%1.png").arg(page + 1);
++
++    App::Document* appDoc = App::GetApplication().getActiveDocument();
++    QString startDir;
++    if (appDoc && appDoc->FileName.getStrValue().length() > 0) {
++        startDir = QFileInfo(QString::fromUtf8(appDoc->FileName.getValue())).absolutePath();
++    }
++    else {
++        startDir = QFileInfo(windowFilePath()).absolutePath();
++    }
++
++    // Gui::FileDialog, not QFileDialog: it honours FreeCAD's dialog preferences and
++    // platform quirks, as every other save dialog in the GUI does.
++    const QString target = FileDialog::getSaveFileName(
++        this,
++        tr("Save cropped region"),
++        QDir(startDir).filePath(suggested),
++        FileDialog::FilterList {{tr("PNG image"), {QStringLiteral("*.png")}}}
++    );
++
++    if (target.isEmpty()) {
++        return;
++    }
++
++    if (!image.save(target, "PNG")) {
++        QMessageBox::warning(this,
++                             tr("Could not save"),
++                             tr("Cannot write %1.").arg(target));
++        return;
++    }
++
++    if (!appDoc) {
++        appDoc = App::GetApplication().newDocument();
++    }
++
++    const QFileInfo info(target);
++    const std::string base =
++        Base::Tools::escapeEncodeString(info.completeBaseName().toUtf8().constData());
++    const std::string path =
++        Base::Tools::escapeEncodeString(info.absoluteFilePath().toUtf8().constData());
++
++    appDoc->openTransaction(QT_TRANSLATE_NOOP("Command", "Insert PDF region"));
++    Gui::cmdAppDocumentArgs(appDoc, "addObject('Image::ImagePlane', '%s')", base);
++    Gui::cmdAppDocumentArgs(appDoc, "ActiveObject.ImageFile = '%s'", path);
++    Gui::cmdAppDocumentArgs(appDoc, "ActiveObject.Label = '%s'", base);
++    Gui::cmdAppDocumentArgs(appDoc,
++                            "ActiveObject.ViewObject.OpaqueBackground = %s",
++                            background.clickedButton() == keepAlpha ? "False" : "True");
++    appDoc->commitTransaction();
++    Gui::cmdAppDocument(appDoc, "recompute()");
++}
++
++void PdfView::onImportRegionAsVectors()
++{
++    const int page = pdfView->regionPage();
++    const QRectF region = pdfView->regionRect();
++
++    if (page < 0 || region.isEmpty() || pageCount() < 1) {
++        return;
++    }
++
++    // Locate pdftocairo
++    const QString pdftocairo =
++        QStandardPaths::findExecutable(QStringLiteral("pdftocairo"));
++    if (pdftocairo.isEmpty()) {
++        QMessageBox::warning(
++            this, tr("pdftocairo not found"),
++            tr("The 'pdftocairo' tool (part of poppler-utils) is required\n"
++               "to extract vector paths from a PDF.\n\n"
++               "Install it with:\n"
++               "  Ubuntu/Debian:  sudo apt install poppler-utils\n"
++               "  Fedora:         sudo dnf install poppler-utils\n"
++               "  Arch:           sudo pacman -S poppler"));
++        return;
++    }
++
++    // Crop first, convert second. pdftocairo ignores -x/-y/-W/-H when writing
++    // SVG, so cropping straight to SVG gives the whole page back. Cropping to
++    // PDF does work, so we go through an intermediate file.
++    const int cropX = static_cast<int>(region.x());
++    const int cropY = static_cast<int>(region.y());
++    const int cropW = static_cast<int>(std::ceil(region.width()));
++    const int cropH = static_cast<int>(std::ceil(region.height()));
++
++    QTemporaryDir tmpDir;
++    if (!tmpDir.isValid()) {
++        QMessageBox::warning(this, tr("pdftocairo failed"), tr("Cannot create a temporary folder."));
++        return;
++    }
++    const QString tmpPdf = tmpDir.filePath(QStringLiteral("region.pdf"));
++    const QString tmpSvg = tmpDir.filePath(QStringLiteral("region.svg"));
++
++    QStringList cropArgs;
++    cropArgs << QStringLiteral("-pdf")
++             << QStringLiteral("-f") << QString::number(page + 1)
++             << QStringLiteral("-l") << QString::number(page + 1)
++             << QStringLiteral("-x") << QString::number(cropX)
++             << QStringLiteral("-y") << QString::number(cropY)
++             << QStringLiteral("-W") << QString::number(cropW)
++             << QStringLiteral("-H") << QString::number(cropH)
++             << windowFilePath()
++             << tmpPdf;
++
++    QProcess crop;
++    crop.start(pdftocairo, cropArgs);
++    if (!crop.waitForFinished(30000) || crop.exitCode() != 0) {
++        QMessageBox::warning(
++            this, tr("pdftocairo failed"),
++            tr("Could not crop the region into a PDF.\n\n%1")
++                .arg(QString::fromUtf8(crop.readAllStandardError())));
++        return;
++    }
++
++    QStringList svgArgs;
++    svgArgs << QStringLiteral("-svg") << tmpPdf << tmpSvg;
++
++    QProcess convert;
++    convert.start(pdftocairo, svgArgs);
++    if (!convert.waitForFinished(30000) || convert.exitCode() != 0) {
++        QMessageBox::warning(
++            this, tr("pdftocairo failed"),
++            tr("Could not convert the cropped PDF to SVG.\n\n%1")
++                .arg(QString::fromUtf8(convert.readAllStandardError())));
++        return;
++    }
++
++    App::Document* appDoc = App::GetApplication().getActiveDocument();
++    if (!appDoc) {
++        appDoc = App::GetApplication().newDocument();
++    }
++
++    // The SVG came from the cropped PDF, so it holds only the selection.
++    // Paths go through escapeEncodeString(): a Windows path or a quote in a
++    // folder name would otherwise break the Python literal.
++    const std::string svgPath = Base::Tools::escapeEncodeString(tmpSvg.toUtf8().constData());
++    const std::string docName = Base::Tools::escapeEncodeString(appDoc->getName());
++    try {
++        Base::Interpreter().runStringArg(
++            "import importSVG\n"
++            "importSVG.insert('%s', '%s')\n",
++            svgPath.c_str(),
++            docName.c_str()
++        );
++    }
++    catch (const Base::Exception& e) {
++        QMessageBox::warning(
++            this,
++            tr("Import failed"),
++            tr("Could not import the extracted vectors.\n\n%1").arg(QString::fromUtf8(e.what()))
++        );
++    }
++    // tmpDir removes both intermediate files.
++}
++
++void PdfView::onCopyPageText()
++{
++    // QPdfView (the widget) exposes no selection API even in Qt 6.11, so
++    // the closest useful action is copying the text of the visible page.
++    const QString text = pageText(pdfView->pageNavigator()->currentPage());
++    if (!text.isEmpty()) {
++        QApplication::clipboard()->setText(text);
++    }
++}
++
++void PdfView::onCopyAllText()
++{
++    const QString text = allText();
++    if (!text.isEmpty()) {
++        QApplication::clipboard()->setText(text);
++    }
++}
++
++void PdfView::applyZoom(qreal factor)
++{
++    // currentPage is derived from the scroll position, so the way to keep the
++    // page stable across a zoom is to move the scrollbars by the same ratio
++    // the document just grew or shrank by. Jumping with the page navigator
++    // does not work: QPdfView recomputes the scroll afterwards and overwrites
++    // it.
++    const qreal oldZoom = pdfView->effectiveZoom();
++    const qreal newZoom = qBound(ZoomMin, oldZoom * factor, ZoomMax);
++    if (qFuzzyCompare(oldZoom, newZoom)) {
++        return;
++    }
++
++    const int oldV = pdfView->verticalScrollBar()->value();
++    const int oldH = pdfView->horizontalScrollBar()->value();
++
++    pdfView->setZoomMode(QPdfView::ZoomMode::Custom);
++    pdfView->setZoomFactor(newZoom);
++
++    const qreal ratio = newZoom / oldZoom;
++    QTimer::singleShot(0, this, [this, oldV, oldH, ratio] {
++        pdfView->verticalScrollBar()->setValue(qRound(oldV * ratio));
++        pdfView->horizontalScrollBar()->setValue(qRound(oldH * ratio));
++        updatePageLabel();
++    });
++}
++
++void PdfView::applyZoomMode(QPdfView::ZoomMode mode)
++{
++    // The resulting scale is not known in advance here, so hold the relative
++    // position in the document instead of an absolute pixel offset.
++    QScrollBar* vbar = pdfView->verticalScrollBar();
++    const int oldMax = vbar->maximum();
++    const qreal fraction = oldMax > 0 ? qreal(vbar->value()) / oldMax : 0.0;
++
++    pdfView->setZoomMode(mode);
++
++    QTimer::singleShot(0, this, [this, fraction] {
++        QScrollBar* bar = pdfView->verticalScrollBar();
++        bar->setValue(qRound(fraction * bar->maximum()));
++        updatePageLabel();
++    });
++}
++
++void PdfView::onZoomIn()
++{
++    applyZoom(ZoomStep);
++}
++
++void PdfView::onZoomOut()
++{
++    applyZoom(1.0 / ZoomStep);
++}
++
++void PdfView::onZoomReset()
++{
++    applyZoomMode(QPdfView::ZoomMode::FitToWidth);
++}
++
++void PdfView::print(QPrinter* printer)
++{
++    printTo(printer);
++}
++
++void PdfView::printTo(QPagedPaintDevice* device)
++{
++    const int count = pageCount();
++    if (count < 1) {
++        return;
++    }
++
++    QPainter painter(device);
++    if (!painter.isActive()) {
++        return;
++    }
++
++    // The painter's origin already sits on the corner of the printable
++    // area, so only the size of the paint rect matters here; adding its
++    // offset as well would apply the margins twice.
++    const int dpi = device->logicalDpiX();
++    const QSize area = device->pageLayout().paintRectPixels(dpi).size();
++
++    // Pages are rasterised, so pick the resolution on its own merits: screen
++    // resolution prints blurred, and a 1200 dpi printer would ask for an
++    // image of several hundred megabytes per page.
++    const qreal renderScale = qreal(qBound(MinPrintDpi, dpi, MaxPrintDpi)) / dpi;
++
++    for (int page = 0; page < count; ++page) {
++        if (page > 0 && !device->newPage()) {
++            break;
++        }
++
++        // Keep the page's own aspect ratio; rendering straight into the
++        // paint rect stretched anything that was not the printer's format.
++        const QSize size = pdfDocument->pagePointSize(page).toSize().scaled(
++            area,
++            Qt::KeepAspectRatio
++        );
++        const QImage image = pdfDocument->render(page, size * renderScale);
++        if (image.isNull()) {
++            continue;
++        }
++
++        const QRect target(
++            QPoint((area.width() - size.width()) / 2, (area.height() - size.height()) / 2),
++            size
++        );
++
++        // QPdfDocument renders with premultiplied alpha over a transparent
++        // background; drawing on white keeps the page from turning black.
++        painter.fillRect(target, Qt::white);
++        painter.drawImage(target, image);
++    }
++}
++
++bool PdfView::onMsg(const char* pMsg)
++{
++    if (strcmp("Save", pMsg) == 0 || strcmp("SaveAs", pMsg) == 0) {
++        return false;
++    }
++    if (strcmp("Print", pMsg) == 0) {
++        print();
++        return true;
++    }
++    if (strcmp("PrintPdf", pMsg) == 0) {
++        printPdf();
++        return true;
++    }
++    if (strcmp("PrintPreview", pMsg) == 0) {
++        printPreview();
++        return true;
++    }
++    if (strcmp("Copy", pMsg) == 0) {
++        onCopySelection();
++        return true;
++    }
++    return false;
++}
++
++bool PdfView::onHasMsg(const char* pMsg) const
++{
++    if (strcmp("Print", pMsg) == 0 || strcmp("PrintPdf", pMsg) == 0
++        || strcmp("PrintPreview", pMsg) == 0) {
++        return pageCount() > 0;
++    }
++    if (strcmp("Copy", pMsg) == 0) {
++        return pageCount() > 0;
++    }
++    return false;
++}
++
++#include "moc_PdfView.cpp"
++
++#endif  // HAVE_QT_PDF_WIDGETS
+diff --git a/src/Gui/PdfView.h b/src/Gui/PdfView.h
+new file mode 100644
+index 0000000000..97fecdc372
+--- /dev/null
++++ b/src/Gui/PdfView.h
+@@ -0,0 +1,278 @@
++// SPDX-License-Identifier: LGPL-2.1-or-later
++
++/***************************************************************************
++ *   Copyright (c) 2026 FreeCAD Project Association                        *
++ *                                                                         *
++ *   This file is part of FreeCAD.                                         *
++ *                                                                         *
++ *   FreeCAD is free software: you can redistribute it and/or modify it    *
++ *   under the terms of the GNU Lesser General Public License as           *
++ *   published by the Free Software Foundation, either version 2.1 of the  *
++ *   License, or (at your option) any later version.                       *
++ *                                                                         *
++ *   FreeCAD is distributed in the hope that it will be useful, but        *
++ *   WITHOUT ANY WARRANTY; without even the implied warranty of            *
++ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU      *
++ *   Lesser General Public License for more details.                       *
++ *                                                                         *
++ *   You should have received a copy of the GNU Lesser General Public      *
++ *   License along with FreeCAD. If not, see                               *
++ *   <https://www.gnu.org/licenses/>.                                      *
++ *                                                                         *
++ ***************************************************************************/
++
++#pragma once
++
++#ifdef HAVE_QT_PDF_WIDGETS
++
++#include <QString>
++
++#include <Gui/MDIView.h>
++
++#include <QPdfSelection>
++#include <QPdfView>
++
++#include <optional>
++
++class QAction;
++class QLabel;
++class QLineEdit;
++class QPagedPaintDevice;
++class QToolButton;
++class QModelIndex;
++class QPdfBookmarkModel;
++class QPdfDocument;
++class QPdfSearchModel;
++class QSplitter;
++class QTreeView;
++
++namespace Gui
++{
++
++/**
++ * QPdfView with mouse text selection.
++ *
++ * QPdfView has no selection API, not even in Qt 6.11, and does not say where
++ * it put each page. This subclass works the layout out again from the
++ * properties it does expose - zoomMode, zoomFactor, pageMode, documentMargins
++ * and pageSpacing - and uses it to turn mouse positions into the page
++ * coordinates getSelection() expects.
++ *
++ * That duplicates QPdfViewPrivate::calculateDocumentLayout(), so a change
++ * upstream would silently move the selection. pageRect() returns a null rect
++ * when it cannot be sure, and callers must check.
++ */
++class GuiExport PdfSelectionView: public QPdfView
++{
++    Q_OBJECT
++
++public:
++    /// What a mouse drag does on the page.
++    enum class DragMode
++    {
++        SelectText,   //!< highlight words, backed by QPdfDocument::getSelection()
++        SelectRegion  //!< rubber-band a rectangle, for cropping to an image
++    };
++
++    explicit PdfSelectionView(QWidget* parent = nullptr);
++
++    void setDragMode(DragMode mode);
++    DragMode dragMode() const
++    {
++        return mode;
++    }
++
++    /// Page the region was drawn on, -1 when there is no region.
++    int regionPage() const
++    {
++        return regionPageIndex;
++    }
++    /// The marked region in page points, empty when there is none.
++    QRectF regionRect() const
++    {
++        return region;
++    }
++    void clearRegion();
++    /// Zoom factor the pages are shown at right now, in any zoom mode.
++    qreal effectiveZoom() const;
++    /// Drop the cached page layout, e.g. after loading a document.
++    void invalidateLayout() const;
++
++    /// Text currently highlighted, empty when there is no selection.
++    QString selectedText() const;
++
++    /// Select every word on the page that is currently in view.
++    void selectAllOnCurrentPage();
++
++    void clearSelection();
++
++Q_SIGNALS:
++    void selectionChanged(const QString& text);
++    void regionChanged(bool hasRegion);
++
++protected:
++    void mousePressEvent(QMouseEvent* event) override;
++    void mouseMoveEvent(QMouseEvent* event) override;
++    void mouseReleaseEvent(QMouseEvent* event) override;
++    void paintEvent(QPaintEvent* event) override;
++
++private:
++    /// Pixels per point of *page* as currently rendered; 0 when unknown.
++    qreal pageScale(int page) const;
++    /// Geometry of *page* in viewport coordinates; null rect when unknown.
++    QRectF pageRect(int page) const;
++    /// Rebuild the layout cache when zoom, viewport or visible pages changed.
++    void ensureLayout() const;
++    /// First and last page that the current page mode puts on screen.
++    void visiblePageRange(int& first, int& last) const;
++    /// Translate a viewport position into a page index plus page points.
++    bool mapToPage(const QPointF& pos, int& page, QPointF& pagePos) const;
++    void updateSelection(const QPointF& to);
++    void paintRegion();
++
++    int anchorPage {-1};
++    QPointF anchorPos;
++    std::optional<QPdfSelection> selection;
++    bool dragging {false};
++
++    // Page rectangles in document coordinates, i.e. before the scroll offset
++    // is applied, and the pixels-per-point of each.  Recomputing these per
++    // mouse event was quadratic in the page count and made dragging unusable
++    // on long documents.
++    mutable QList<QRectF> layoutCache;
++    mutable QList<qreal> scaleCache;
++    mutable int cachedFirst {-1};
++    mutable int cachedLast {-1};
++    mutable QSize cachedViewport;
++    mutable QPdfView::ZoomMode cachedZoomMode {QPdfView::ZoomMode::Custom};
++    mutable qreal cachedZoom {-1.0};
++
++    DragMode mode {DragMode::SelectText};
++    int regionPageIndex {-1};
++    QRectF region;
++};
++
++
++/**
++ * A viewer for PDF documents backed by the Qt PDF module.
++ *
++ * Unlike ImageView, which rasterises a page into a QImage, this view keeps
++ * the document itself, so the text stays live: it can be searched with
++ * QPdfSearchModel and extracted with QPdfDocument::getSelection().
++ *
++ * The class is only compiled when Qt6::PdfWidgets was found at configure
++ * time (HAVE_QT_PDF_WIDGETS).
++ */
++class GuiExport PdfView: public MDIView
++{
++    Q_OBJECT
++
++public:
++    explicit PdfView(QWidget* parent = nullptr);
++    ~PdfView() override;
++
++    /// Load a PDF file. Returns false and shows a message on failure.
++    bool loadFile(const QString& fileName);
++
++    const char* getName() const override
++    {
++        return "PdfView";
++    }
++
++    bool onMsg(const char* pMsg) override;
++    bool onHasMsg(const char* pMsg) const override;
++
++protected:
++    void changeEvent(QEvent* event) override;
++    bool event(QEvent* event) override;
++    void keyPressEvent(QKeyEvent* event) override;
++
++    /** @name Printing */
++    //@{
++    using MDIView::print;
++    void print(QPrinter* printer) override;
++    void printTo(QPagedPaintDevice* device);
++    //@}
++
++    /// Text of the whole document, page by page, joined with newlines.
++    QString allText() const;
++
++    /// Text of a single page, empty when the page has no extractable text.
++    QString pageText(int page) const;
++
++    /// Number of pages, or 0 when nothing is loaded.
++    int pageCount() const;
++
++private Q_SLOTS:
++    void onSearchTextChanged(const QString& text);
++    void onSearchResultsChanged();
++    void onFindNext();
++    void onFindPrevious();
++    void onCopyPageText();
++    void onCopyAllText();
++    void onCopySelection();
++    void onSelectionChanged(const QString& text);
++    void onDragModeToggled(bool regionMode);
++    void onRegionChanged(bool hasRegion);
++    void onInsertRegionAsImagePlane();
++    void onImportRegionAsVectors();
++    void onZoomIn();
++    void onZoomOut();
++    void onZoomReset();
++    void onPrevPage();
++    void onNextPage();
++    void onPageChanged(int page);
++    void updatePageLabel();
++    void onBookmarkActivated(const QModelIndex& index);
++    void updateBookmarkPanel();
++
++private:
++    /// Change zoom while keeping the same content under the viewport.
++    void applyZoom(qreal factor);
++    /// Switch to a zoom mode, preserving the scroll fraction.
++    void applyZoomMode(QPdfView::ZoomMode mode);
++
++    void setupUi();
++    void setupActions();
++    /// Re-apply every visible string. Called when the language changes.
++    void retranslateUi();
++    void retranslateActions();
++    /// Move the view to search result *index* and update the counter label.
++    void showResult(int index);
++    void updateResultLabel();
++
++    QPdfDocument* pdfDocument {nullptr};
++    QPdfSearchModel* searchModel {nullptr};
++    QPdfBookmarkModel* bookmarkModel {nullptr};
++    PdfSelectionView* pdfView {nullptr};
++    QSplitter* splitter {nullptr};
++    QTreeView* bookmarkView {nullptr};
++
++    QLineEdit* searchEdit {nullptr};
++    QToolButton* prevPageButton {nullptr};
++    QToolButton* nextPageButton {nullptr};
++    QLabel* pageLabel {nullptr};
++    QLabel* resultLabel {nullptr};
++    QLabel* selectionLabel {nullptr};
++    QToolButton* bookmarkButton {nullptr};
++    QToolButton* regionButton {nullptr};
++    QToolButton* zoomInButton {nullptr};
++    QToolButton* zoomOutButton {nullptr};
++    QToolButton* zoomFitButton {nullptr};
++    QAction* copyAction {nullptr};
++    QAction* selectPageAction {nullptr};
++    QAction* copyPageAction {nullptr};
++    QAction* copyAllAction {nullptr};
++    QAction* insertRegionAction {nullptr};
++    QAction* importVectorsAction {nullptr};
++    QToolButton* prevButton {nullptr};
++    QToolButton* nextButton {nullptr};
++
++    int currentResult {-1};
++    /// Set while a new search waits for its first result to scroll to.
++    bool jumpToFirstResult {false};
++};
++
++}  // namespace Gui
++
++#endif  // HAVE_QT_PDF_WIDGETS
+diff --git a/src/Gui/StartupProcess.cpp b/src/Gui/StartupProcess.cpp
+index 4f87ca63ab..b9b00a2f27 100644
+--- a/src/Gui/StartupProcess.cpp
++++ b/src/Gui/StartupProcess.cpp
+@@ -429,12 +429,23 @@ void StartupPostProcess::setImportImageFormats()
+     std::stringstream str;
+     str << "Image formats (";
+     for (const auto& ext : supportedFormats) {
++#ifdef HAVE_QT_PDF_WIDGETS
++        // The Qt PDF image plugin lists PDF as an image format, but with the
++        // native viewer built in FileHandler opens it in Gui::PdfView, so it
++        // gets a file type of its own below instead of hiding among images.
++        if (ext.toLower() == "pdf") {
++            continue;
++        }
++#endif
+         str << "*." << ext.constData() << " *." << ext.toUpper().constData() << " ";
+     }
+     str << ")";
+ 
+     std::string filter = str.str();
+     App::GetApplication().addImportType(filter.c_str(), "FreeCADGui");
++#ifdef HAVE_QT_PDF_WIDGETS
++    App::GetApplication().addImportType("PDF document (*.pdf)", "FreeCADGui");
++#endif
+ }
+ 
+ void StartupPostProcess::showMainWindow()
+diff --git a/src/Gui/View3DInventor.cpp b/src/Gui/View3DInventor.cpp
+index 788b53915f..18928962f1 100644
+--- a/src/Gui/View3DInventor.cpp
++++ b/src/Gui/View3DInventor.cpp
+@@ -29,12 +29,17 @@
+ #include <QDragEnterEvent>
+ #include <QLayout>
+ #include <QMdiSubWindow>
++#include <QCheckBox>
++#include <QDialog>
++#include <QDialogButtonBox>
++#include <QFormLayout>
+ #include <QMessageBox>
+ #include <QMimeData>
+ #include <QPainter>
+ #include <QPrinter>
+ #include <QPrintDialog>
+ #include <QPrintPreviewDialog>
++#include <QSpinBox>
+ #include <QStackedWidget>
+ #include <QSurfaceFormat>
+ #include <QTimer>
+@@ -54,6 +59,7 @@
+ #include <Base/Builder3D.h>
+ #include <Base/Console.h>
+ #include <Base/Interpreter.h>
++#include <Base/Tools.h>
+ 
+ #include <Gui/PreferencePages/DlgSettingsPDF.h>
+ 
+@@ -294,8 +300,52 @@ void View3DInventor::printPdf()
+         FileDialog::FilterList {{QStringLiteral("PDF"), {"*.pdf"}}}
+     );
+     if (!filename.isEmpty()) {
++        // The view is rasterised into the PDF, so both of these matter and
++        // neither has a good default for every job: a drawing to print wants
++        // white and plenty of dots, a figure to drop into a document often
++        // wants neither.
++        QDialog options(this);
++        options.setWindowTitle(tr("PDF export"));
++
++        // A PDF page is white paper by definition, so a transparent
++        // background is invisible in any viewer. It only shows once the
++        // file is placed into another document, which is worth saying
++        // rather than letting the option look broken.
++        auto* transparent = new QCheckBox(tr("Transparent background"), &options);
++        transparent->setChecked(pdfTransparentBackground);
++        transparent->setToolTip(
++            tr("PDF pages are always shown on white. This only has an\n"
++               "effect when the file is placed into another document."));
++
++        auto* dpi = new QSpinBox(&options);
++        // The whole page is rendered into one offscreen buffer with 8x
++        // multisampling; beyond 600 dpi an A3 page outgrows what most GPUs
++        // can allocate.
++        dpi->setRange(72, 600);
++        dpi->setSingleStep(50);
++        dpi->setSuffix(tr(" dpi"));
++        dpi->setValue(pdfResolution);
++
++        auto* buttons = new QDialogButtonBox(
++            QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &options);
++        connect(buttons, &QDialogButtonBox::accepted, &options, &QDialog::accept);
++        connect(buttons, &QDialogButtonBox::rejected, &options, &QDialog::reject);
++
++        auto* form = new QFormLayout(&options);
++        form->addRow(tr("Resolution:"), dpi);
++        form->addRow(QString(), transparent);
++        form->addRow(buttons);
++
++        if (options.exec() != QDialog::Accepted) {
++            return;
++        }
++
++        pdfTransparentBackground = transparent->isChecked();
++        pdfResolution = dpi->value();
++
+         Gui::WaitCursor wc;
+-        QPrinter printer(QPrinter::ScreenResolution);
++        QPrinter printer(QPrinter::HighResolution);
++        printer.setResolution(pdfResolution);
+         // setPdfVersion sets the printed PDF Version to what is chosen in
+         // Preferences/Import-Export/PDF more details under:
+         // https://www.kdab.com/creating-pdfa-documents-qt/
+@@ -304,7 +354,13 @@ void View3DInventor::printPdf()
+         printer.setPageOrientation(QPageLayout::Landscape);
+         printer.setOutputFileName(filename);
+         printer.setCreator(QString::fromStdString(App::Application::getNameWithVersion()));
+-        print(&printer);
++        // Only this export renders transparent; Print and Print preview
++        // keep the white background.
++        {
++            Base::StateLocker locker(renderTransparent, pdfTransparentBackground);
++            print(&printer);
++        }
++        offerToAttachExport(filename);
+     }
+ }
+ 
+@@ -345,9 +401,24 @@ void View3DInventor::print(QPrinter* printer)
+     options.width = rect.width();
+     options.height = rect.height();
+     options.samples = 8;
+-    options.background = QColor(255, 255, 255);
++    options.background =
++        renderTransparent ? QColor(Qt::transparent) : QColor(Qt::white);
+     options.intent = View3DInventorViewer::RenderIntent::RasterCapture;
+     QImage img = _viewer->renderToImage(options);
++    if (img.isNull()) {
++        // The offscreen buffer grows with the resolution and the graphics
++        // driver may refuse it; say so instead of leaving an empty page.
++        p.end();
++        qApp->setOverrideCursor(Qt::ArrowCursor);
++        QMessageBox::warning(
++            this,
++            tr("Rendering failed"),
++            tr("The view could not be rendered at %1 dpi. Try a lower resolution.")
++                .arg(printer->resolution())
++        );
++        qApp->restoreOverrideCursor();
++        return;
++    }
+     p.drawImage(0, 0, img);
+     p.end();
+ }
+diff --git a/src/Gui/View3DInventor.h b/src/Gui/View3DInventor.h
+index 81e48f0e67..1872dbe742 100644
+--- a/src/Gui/View3DInventor.h
++++ b/src/Gui/View3DInventor.h
+@@ -166,6 +166,13 @@ private:
+     std::unique_ptr<View3DSettings> viewSettings;
+     std::unique_ptr<NaviCubeSettings> naviSettings;
+ 
++    /// Last choices made in the PDF export dialog.
++    bool pdfTransparentBackground {false};
++    int pdfResolution {150};
++    /// Set by printPdf() only while it prints, read by print(), which has no
++    /// way to ask.
++    bool renderTransparent {false};
++
+     // friends
+     friend class View3DPy;
+ };
+diff --git a/src/Gui/ViewProviderImagePlane.cpp b/src/Gui/ViewProviderImagePlane.cpp
+index 5507cae0d8..87bdab9944 100644
+--- a/src/Gui/ViewProviderImagePlane.cpp
++++ b/src/Gui/ViewProviderImagePlane.cpp
+@@ -27,6 +27,7 @@
+ #include <QImage>
+ #include <QImageReader>
+ #include <QMenu>
++#include <QPainter>
+ #include <QString>
+ #include <QSvgRenderer>
+ #include <Inventor/nodes/SoCoordinate3.h>
+@@ -60,6 +61,13 @@ ViewProviderImagePlane::ViewProviderImagePlane()
+ {
+     ADD_PROPERTY_TYPE(Lighting, (1L), "Object Style", App::Prop_None, "Set object lighting.");
+     Lighting.setEnums(LightingEnums);
++    ADD_PROPERTY_TYPE(OpaqueBackground,
++                      (false),
++                      "Object Style",
++                      App::Prop_None,
++                      "Replace a transparent background with white.\n"
++                      "Images rendered from PDF carry premultiplied alpha,\n"
++                      "which otherwise shows up as a black page.");
+ 
+     texture = new SoTexture2;
+     texture->ref();
+@@ -163,6 +171,10 @@ void ViewProviderImagePlane::onChanged(const App::Property* prop)
+             shapeHints->vertexOrdering = SoShapeHints::COUNTERCLOCKWISE;
+         }
+     }
++    // pcObject is only set once attach() has run.
++    if (prop == &OpaqueBackground && pcObject) {
++        loadImage();
++    }
+     ViewProviderGeometryObject::onChanged(prop);
+ }
+ 
+@@ -261,7 +273,24 @@ QImage ViewProviderImagePlane::loadRaster(const char* fileName) const
+         }
+     }
+ 
+-    return reader.read();
++    QImage img = reader.read();
++
++    // Flatten onto white when asked. Images rendered from a PDF arrive in
++    // a premultiplied-alpha format whose transparent page background reads
++    // as black; other formats keep their alpha, so deliberate transparency
++    // is preserved.
++    if (!img.isNull() && img.hasAlphaChannel() && OpaqueBackground.getValue()) {
++        QImage opaque(img.size(), QImage::Format_RGB32);
++        opaque.fill(Qt::white);
++        QPainter painter(&opaque);
++        painter.drawImage(0, 0, img);
++        painter.end();
++        opaque.setDotsPerMeterX(img.dotsPerMeterX());
++        opaque.setDotsPerMeterY(img.dotsPerMeterY());
++        return opaque;
++    }
++
++    return img;
+ }
+ 
+ void ViewProviderImagePlane::reloadIfSvg()
+diff --git a/src/Gui/ViewProviderImagePlane.h b/src/Gui/ViewProviderImagePlane.h
+index 941ed52442..736668d1e2 100644
+--- a/src/Gui/ViewProviderImagePlane.h
++++ b/src/Gui/ViewProviderImagePlane.h
+@@ -43,6 +43,7 @@ public:
+     ~ViewProviderImagePlane() override;
+ 
+     App::PropertyEnumeration Lighting;
++    App::PropertyBool OpaqueBackground;
+ 
+     void attach(App::DocumentObject* pcObject) override;
+     void setDisplayMode(const char* ModeName) override;
+diff --git a/src/Mod/CMakeLists.txt b/src/Mod/CMakeLists.txt
+index 032e19800f..0cf0b51431 100644
+--- a/src/Mod/CMakeLists.txt
++++ b/src/Mod/CMakeLists.txt
+@@ -124,6 +124,10 @@ if(BUILD_TEST)
+   add_subdirectory(Test)
+ endif(BUILD_TEST)
+ 
++if(BUILD_DOCUMENTATION)
++    add_subdirectory(Documentation)
++endif(BUILD_DOCUMENTATION)
++
+ if(BUILD_TUX)
+     add_subdirectory(Tux)
+ endif(BUILD_TUX)
+diff --git a/src/Mod/Documentation/CMakeLists.txt b/src/Mod/Documentation/CMakeLists.txt
+new file mode 100644
+index 0000000000..f88c7e6ae0
+--- /dev/null
++++ b/src/Mod/Documentation/CMakeLists.txt
+@@ -0,0 +1,83 @@
++# SPDX-License-Identifier: LGPL-2.1-or-later
++
++IF (BUILD_GUI)
++    PYSIDE_WRAP_RC(
++        RELATIVE Documentation_QRC_SRCS_REL
++        ABSOLUTE Documentation_QRC_SRCS
++        RESOURCES Resources/Documentation.qrc
++    )
++ENDIF (BUILD_GUI)
++
++SET(Documentation_SRCS
++    Init.py
++    InitGui.py
++    DocumentationObjects.py
++    DocumentationCommands.py
++    DocumentationViewers.py
++    DocumentationImport.py
++    DocumentationRaster.py
++    DocumentationRasterImport.py
++    ViewProviders.py
++)
++SOURCE_GROUP("" FILES ${Documentation_SRCS})
++
++SET(Documentation_Tests
++    Tests/__init__.py
++    Tests/TestDocumentation.py
++)
++SOURCE_GROUP("Tests" FILES ${Documentation_Tests})
++
++SET(Documentation_Icons
++    Resources/icons/DocumentationWorkbench.svg
++    Resources/icons/Documentation_AddDocument.svg
++    Resources/icons/Documentation_AddNote.svg
++    Resources/icons/Documentation_EditNote.svg
++    Resources/icons/Documentation_Export.svg
++    Resources/icons/Documentation_File.svg
++    Resources/icons/Documentation_Group.svg
++    Resources/icons/Documentation_Open.svg
++    Resources/icons/Documentation_Pdf.svg
++    Resources/icons/Documentation_Replace.svg
++    Resources/icons/Documentation_Text.svg
++)
++
++ADD_CUSTOM_TARGET(Documentation ALL
++    DEPENDS ${Documentation_QRC_SRCS}
++    SOURCES ${Documentation_SRCS} ${Documentation_Tests} ${Documentation_Icons}
++)
++
++fc_copy_sources(Documentation
++    "${CMAKE_BINARY_DIR}/Mod/Documentation"
++    ${Documentation_SRCS}
++    ${Documentation_Tests}
++)
++
++# InitGui resolves the workbench icon through FreeCAD.getResourceDir(), which
++# points at the data directory rather than Mod/, so the icons have to land
++# there as well - the same split Draft uses.
++fc_copy_sources(Documentation
++    "${CMAKE_BINARY_DIR}/${CMAKE_INSTALL_DATADIR}/Mod/Documentation"
++    ${Documentation_Icons}
++)
++
++IF (BUILD_GUI)
++    fc_target_copy_resource(Documentation
++        "${CMAKE_CURRENT_BINARY_DIR}"
++        "${CMAKE_BINARY_DIR}/Mod/Documentation"
++        ${Documentation_QRC_SRCS_REL})
++ENDIF (BUILD_GUI)
++
++INSTALL(
++    FILES ${Documentation_SRCS} ${Documentation_QRC_SRCS}
++    DESTINATION Mod/Documentation
++)
++
++INSTALL(
++    FILES ${Documentation_Tests}
++    DESTINATION Mod/Documentation/Tests
++)
++
++INSTALL(
++    FILES ${Documentation_Icons}
++    DESTINATION "${CMAKE_INSTALL_DATADIR}/Mod/Documentation/Resources/icons"
++)
+diff --git a/src/Mod/Documentation/DocumentationCommands.py b/src/Mod/Documentation/DocumentationCommands.py
+new file mode 100644
+index 0000000000..f004286feb
+--- /dev/null
++++ b/src/Mod/Documentation/DocumentationCommands.py
+@@ -0,0 +1,665 @@
++# SPDX-License-Identifier: LGPL-2.1-or-later
++"""Commands for the Documentation workbench."""
++
++import html
++import os
++import shutil
++import tempfile
++
++import FreeCAD
++
++translate = FreeCAD.Qt.translate
++QT_TRANSLATE_NOOP = FreeCAD.Qt.QT_TRANSLATE_NOOP
++import FreeCADGui
++from PySide import QtCore, QtGui, QtWidgets
++
++import DocumentationObjects as DocObjects
++from ViewProviders import icon_path
++
++
++FILE_FILTER = (
++    "Documents (*.pdf *.rtf *.doc *.docx *.odt *.txt *.md *.html *.csv);;"
++    "PDF (*.pdf);;"
++    "Text (*.rtf *.txt *.md *.html);;"
++    "All files (*)"
++)
++
++
++def _main_window():
++    return FreeCADGui.getMainWindow()
++
++
++def _selected_group():
++    """Return a documentation group from the selection, if any."""
++    for obj in FreeCADGui.Selection.getSelection():
++        if getattr(obj, "Proxy", None) is None:
++            continue
++        if getattr(obj.Proxy, "Type", "") == DocObjects.DocumentationGroup.Type:
++            return obj
++    return None
++
++
++def _selected_parent():
++    """Return a suitable parent for a new documentation folder.
++
++    Returns one of:
++    - A Documentation group (to nest folders)
++    - A Body, Part or any object with Group extension (to attach docs to a part)
++    - None (will create at document root level)
++    """
++    for obj in FreeCADGui.Selection.getSelection():
++        proxy = getattr(obj, "Proxy", None)
++        # Our own documentation group
++        if proxy is not None and getattr(proxy, "Type", "") == DocObjects.DocumentationGroup.Type:
++            return obj
++        # FreeCAD Body, Part, or anything that can hold children
++        if hasattr(obj, "addObject"):
++            return obj
++    return None
++
++
++def _ensure_document():
++    if FreeCAD.ActiveDocument is None:
++        FreeCAD.newDocument()
++    return FreeCAD.ActiveDocument
++
++
++class _Command:
++    """Base class supplying the bits every command repeats."""
++
++    icon = ""
++    menu = ""
++    tip = ""
++
++    def GetResources(self):
++        return {
++            "Pixmap": icon_path(self.icon),
++            "MenuText": self.menu,
++            "ToolTip": self.tip,
++        }
++
++    def IsActive(self):
++        return True
++
++
++class AddDocument(_Command):
++    icon = "Documentation_AddDocument.svg"
++    menu = QT_TRANSLATE_NOOP("Documentation_AddDocument", "Attach document")
++    tip = QT_TRANSLATE_NOOP(
++        "Documentation_AddDocument",
++        "Attach a PDF, RTF or other file to the model.\n"
++        "Embedded files are stored inside the FCStd.",
++    )
++
++    def Activated(self):
++        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
++            _main_window(),
++            translate("Documentation", "Select documents to attach"),
++            "",
++            FILE_FILTER,
++        )
++        if not paths:
++            return
++
++        embed = self._askEmbed(paths)
++        if embed is None:
++            return
++
++        doc = _ensure_document()
++        parent = _selected_parent()
++
++        doc.openTransaction("Attach document")
++        created = []
++        try:
++            for path in paths:
++                created.append(DocObjects.make_document(path, embed=embed, parent=parent))
++        finally:
++            doc.commitTransaction()
++        doc.recompute()
++
++        # Attaching a single document usually means the user wants to see it.
++        if len(created) == 1:
++            from DocumentationViewers import open_document
++
++            open_document(created[0])
++
++    def _askEmbed(self, paths):
++        """Ask how the files should be stored; None means cancelled."""
++        total = 0
++        for path in paths:
++            try:
++                total += os.path.getsize(path)
++            except OSError:
++                pass
++
++        box = QtWidgets.QMessageBox(_main_window())
++        box.setWindowTitle(translate("Documentation", "How should this be stored?"))
++        box.setText(
++            translate(
++                "Documentation",
++                "Embedding copies the file into the FCStd, so the model stays "
++                "self-contained. Linking keeps only the path, leaving the FCStd small.",
++            )
++        )
++        box.setInformativeText(
++            translate("Documentation", "Selected: %s file(s), %s")
++            % (len(paths), DocObjects.human_size(total))
++        )
++        embed_btn = box.addButton(
++            translate("Documentation", "Embed in FCStd"), QtWidgets.QMessageBox.AcceptRole
++        )
++        link_btn = box.addButton(
++            translate("Documentation", "Link to file"), QtWidgets.QMessageBox.AcceptRole
++        )
++        box.addButton(QtWidgets.QMessageBox.Cancel)
++        box.setDefaultButton(embed_btn)
++        box.exec()
++
++        clicked = box.clickedButton()
++        if clicked is embed_btn:
++            return True
++        if clicked is link_btn:
++            return False
++        return None
++
++
++class AddNote(_Command):
++    icon = "Documentation_AddNote.svg"
++    menu = QT_TRANSLATE_NOOP("Documentation_AddNote", "Add note")
++    tip = QT_TRANSLATE_NOOP(
++        "Documentation_AddNote",
++        "Write a rich-text note and store it inside the model",
++    )
++
++    def Activated(self):
++        dialog = _RichNoteDialog(_main_window())
++        if dialog.exec() != QtWidgets.QDialog.Accepted:
++            return
++
++        label = dialog.titleText() or translate("Documentation", "Note")
++        body = dialog.bodyHtml()
++
++        doc = _ensure_document()
++        temp = _write_temp(label, body, ".html")
++
++        doc.openTransaction("Add note")
++        try:
++            obj = DocObjects.make_document(
++                temp, embed=True, parent=_selected_parent(), label=label
++            )
++            obj.Description = translate("Documentation", "Note written in FreeCAD")
++        finally:
++            doc.commitTransaction()
++        doc.recompute()
++
++        try:
++            os.remove(temp)
++        except OSError:
++            pass
++
++
++class _RichNoteDialog(QtWidgets.QDialog):
++    """Dialog with a title field, a formatting toolbar and a rich-text body."""
++
++    def __init__(self, parent=None):
++        super().__init__(parent)
++        self.setWindowTitle(translate("Documentation", "New note"))
++        self.resize(620, 500)
++
++        self._title = QtWidgets.QLineEdit()
++        self._title.setPlaceholderText(translate("Documentation", "Title"))
++
++        self._body = QtWidgets.QTextEdit()
++        self._body.setAcceptRichText(True)
++
++        toolbar = self._makeToolbar()
++
++        buttons = QtWidgets.QDialogButtonBox(
++            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
++        )
++        buttons.accepted.connect(self.accept)
++        buttons.rejected.connect(self.reject)
++
++        layout = QtWidgets.QVBoxLayout(self)
++        layout.addWidget(self._title)
++        layout.addLayout(toolbar)
++        layout.addWidget(self._body)
++        layout.addWidget(buttons)
++
++    def titleText(self):
++        return self._title.text().strip()
++
++    def bodyHtml(self):
++        return self._body.toHtml()
++
++    def _makeToolbar(self):
++        bar = QtWidgets.QHBoxLayout()
++
++        bold = QtWidgets.QToolButton(text="B")
++        bold.setCheckable(True)
++        bold.setStyleSheet("font-weight: bold;")
++        bold.toggled.connect(lambda on: self._body.setFontWeight(
++            QtGui.QFont.Bold if on else QtGui.QFont.Normal
++        ))
++
++        italic = QtWidgets.QToolButton(text="I")
++        italic.setCheckable(True)
++        italic.setStyleSheet("font-style: italic;")
++        italic.toggled.connect(lambda on: self._body.setFontItalic(on))
++
++        underline = QtWidgets.QToolButton(text="U")
++        underline.setCheckable(True)
++        underline.setStyleSheet("text-decoration: underline;")
++        underline.toggled.connect(lambda on: self._body.setFontUnderline(on))
++
++        sep1 = QtWidgets.QFrame(frameShape=QtWidgets.QFrame.VLine)
++
++        bullet = QtWidgets.QToolButton(text="\u2022 List")
++        bullet.clicked.connect(self._toggleBulletList)
++
++        sep2 = QtWidgets.QFrame(frameShape=QtWidgets.QFrame.VLine)
++
++        link = QtWidgets.QToolButton(text="\U0001F517 Link")
++        link.clicked.connect(self._insertLink)
++
++        size_box = QtWidgets.QComboBox()
++        for s in (8, 10, 12, 14, 18, 24):
++            size_box.addItem(str(s), s)
++        size_box.setCurrentIndex(2)  # 12
++        size_box.currentIndexChanged.connect(
++            lambda: self._body.setFontPointSize(
++                float(size_box.currentData())
++            )
++        )
++
++        for w in (bold, italic, underline, sep1, bullet, sep2, link):
++            bar.addWidget(w)
++        bar.addStretch(1)
++        bar.addWidget(QtWidgets.QLabel(translate("Documentation", "Size:")))
++        bar.addWidget(size_box)
++
++        # Keep toggle buttons in sync when the cursor moves into styled text
++        self._bold_btn = bold
++        self._italic_btn = italic
++        self._underline_btn = underline
++        self._body.cursorPositionChanged.connect(self._syncToolbar)
++
++        return bar
++
++    def _syncToolbar(self):
++        fmt = self._body.currentCharFormat()
++        self._bold_btn.blockSignals(True)
++        self._bold_btn.setChecked(fmt.fontWeight() >= QtGui.QFont.Bold)
++        self._bold_btn.blockSignals(False)
++        self._italic_btn.blockSignals(True)
++        self._italic_btn.setChecked(fmt.fontItalic())
++        self._italic_btn.blockSignals(False)
++        self._underline_btn.blockSignals(True)
++        self._underline_btn.setChecked(fmt.fontUnderline())
++        self._underline_btn.blockSignals(False)
++
++    def _toggleBulletList(self):
++        cursor = self._body.textCursor()
++        lst = cursor.currentList()
++        if lst:
++            # Remove list formatting
++            block_fmt = QtGui.QTextBlockFormat()
++            cursor.setBlockFormat(block_fmt)
++        else:
++            lst_fmt = QtGui.QTextListFormat()
++            lst_fmt.setStyle(QtGui.QTextListFormat.ListDisc)
++            cursor.createList(lst_fmt)
++
++    def _insertLink(self):
++        url, ok = QtWidgets.QInputDialog.getText(
++            self,
++            translate("Documentation", "Insert link"),
++            translate("Documentation", "URL:"),
++        )
++        if not ok or not url.strip():
++            return
++        text = self._body.textCursor().selectedText() or url.strip()
++        self._body.insertHtml(
++            '<a href="%s">%s</a> '
++            % (html.escape(url.strip(), quote=True), html.escape(text, quote=False))
++        )
++
++
++class AddGroup(_Command):
++    icon = "Documentation_Group.svg"
++    menu = QT_TRANSLATE_NOOP("Documentation_AddGroup", "Add folder")
++    tip = QT_TRANSLATE_NOOP(
++        "Documentation_AddGroup",
++        "Create a documentation folder.\n"
++        "Select a Body, Part or folder first to nest it there.",
++    )
++
++    def Activated(self):
++        doc = _ensure_document()
++        doc.openTransaction("Add documentation folder")
++        try:
++            DocObjects.make_group(parent=_selected_parent())
++        finally:
++            doc.commitTransaction()
++        doc.recompute()
++
++
++class OpenDocument(_Command):
++    icon = "Documentation_Open.svg"
++    menu = QT_TRANSLATE_NOOP("Documentation_Open", "Open")
++    tip = QT_TRANSLATE_NOOP("Documentation_Open", "Open the selected document")
++
++    def Activated(self):
++        from DocumentationViewers import open_document
++
++        for obj in _selected_documents():
++            open_document(obj)
++
++    def IsActive(self):
++        return bool(_selected_documents())
++
++
++class ExportDocument(_Command):
++    icon = "Documentation_Export.svg"
++    menu = QT_TRANSLATE_NOOP("Documentation_Export", "Save a copy")
++    tip = QT_TRANSLATE_NOOP(
++        "Documentation_Export", "Write the selected document back out to disk"
++    )
++
++    def Activated(self):
++        for obj in _selected_documents():
++            export_document(obj)
++
++    def IsActive(self):
++        return bool(_selected_documents())
++
++
++class ReplaceDocument(_Command):
++    icon = "Documentation_Replace.svg"
++    menu = QT_TRANSLATE_NOOP("Documentation_Replace", "Replace file")
++    tip = QT_TRANSLATE_NOOP(
++        "Documentation_Replace", "Swap in a new revision, keeping the metadata"
++    )
++
++    def Activated(self):
++        selection = _selected_documents()
++        if selection:
++            replace_document(selection[0])
++
++    def IsActive(self):
++        return len(_selected_documents()) == 1
++
++
++def _selected_documents():
++    result = []
++    for obj in FreeCADGui.Selection.getSelection():
++        proxy = getattr(obj, "Proxy", None)
++        if proxy is not None and getattr(proxy, "Type", "") == DocObjects.AttachedDocument.Type:
++            result.append(obj)
++    return result
++
++
++def _write_temp(label, content, suffix):
++    """Write *content* to a temporary file named after *label*.
++
++    The payload only has to survive until PropertyFileIncluded has copied it
++    into the document, so the system temp directory is the right place for
++    it - not the user config directory.
++    """
++    handle, path = tempfile.mkstemp(prefix=_slug(label) + "_", suffix=suffix)
++    with os.fdopen(handle, "w", encoding="utf-8") as stream:
++        stream.write(content)
++    return path
++
++
++# Notes the editor can round-trip without losing anything: HTML as rich
++# text, the plain formats as plain text. RTF only displays as text, so
++# saving it from here would replace it with something else.
++_EDITABLE_HTML = (".html", ".htm")
++_EDITABLE_PLAIN = (".txt", ".md", ".csv", ".log")
++
++
++def is_editable_note(obj):
++    """True when *obj* is a text attachment the note editor can save back."""
++    suffix = os.path.splitext(getattr(obj, "FileName", "") or "")[1].lower()
++    return suffix in _EDITABLE_HTML + _EDITABLE_PLAIN
++
++
++def _slug(text):
++    keep = "-_. "
++    cleaned = "".join(c for c in text if c.isalnum() or c in keep).strip()
++    return cleaned.replace(" ", "_") or "note"
++
++
++def export_document(obj):
++    """Write the payload of *obj* to a location the user picks."""
++    source = obj.Proxy.resolvePath(obj)
++    if not source or not os.path.exists(source):
++        QtWidgets.QMessageBox.warning(
++            _main_window(),
++            translate("Documentation", "Document unavailable"),
++            translate("Documentation", "There is no file to save for '%s'.") % obj.Label,
++        )
++        return
++
++    target, _ = QtWidgets.QFileDialog.getSaveFileName(
++        _main_window(),
++        translate("Documentation", "Save a copy"),
++        obj.FileName or obj.Label,
++    )
++    if not target:
++        return
++
++    try:
++        shutil.copyfile(source, target)
++    except OSError as exc:
++        QtWidgets.QMessageBox.critical(
++            _main_window(),
++            translate("Documentation", "Could not save"),
++            str(exc),
++        )
++
++
++def replace_document(obj):
++    """Point *obj* at a new file, leaving its metadata alone."""
++    path, _ = QtWidgets.QFileDialog.getOpenFileName(
++        _main_window(),
++        translate("Documentation", "Select the new revision"),
++        "",
++        FILE_FILTER,
++    )
++    if not path:
++        return
++
++    doc = obj.Document
++    doc.openTransaction("Replace document")
++    try:
++        if obj.Embedded:
++            obj.EmbeddedFile = path
++        else:
++            obj.ExternalFile = path
++        obj.Proxy.refreshMetadata(obj)
++    finally:
++        doc.commitTransaction()
++    doc.recompute()
++
++
++def edit_note(obj):
++    """Open the note editor for an existing HTML or plain-text attachment."""
++    if not is_editable_note(obj):
++        return
++    path = obj.Proxy.resolvePath(obj)
++    if not path or not os.path.exists(path):
++        return
++
++    from DocumentationViewers import read_text
++
++    content = read_text(path)
++    suffix = os.path.splitext(obj.FileName)[1].lower()
++    plain = suffix in _EDITABLE_PLAIN
++
++    dialog = _RichNoteDialog(_main_window())
++    dialog.setWindowTitle(
++        translate("Documentation", "Edit: %s") % obj.Label
++    )
++    dialog._title.setText(obj.Label)
++    if plain:
++        dialog._body.setAcceptRichText(False)
++        dialog._body.setPlainText(content)
++    else:
++        dialog._body.setHtml(content)
++
++    if dialog.exec() != QtWidgets.QDialog.Accepted:
++        return
++
++    label = dialog.titleText() or obj.Label
++    new_content = dialog._body.toPlainText() if plain else dialog.bodyHtml()
++
++    doc = obj.Document
++
++    if not obj.Embedded:
++        # A linked note is the user's own file: write it in place rather than
++        # pointing the object somewhere else.
++        try:
++            with open(path, "w", encoding="utf-8") as stream:
++                stream.write(new_content)
++        except OSError as exc:
++            QtWidgets.QMessageBox.critical(
++                _main_window(), translate("Documentation", "Could not save"), str(exc)
++            )
++            return
++        doc.openTransaction("Edit note")
++        try:
++            obj.Label = label
++            obj.Proxy.refreshMetadata(obj)
++        finally:
++            doc.commitTransaction()
++        doc.recompute()
++        return
++
++    # Keep the original file name so the payload does not turn into a temp name.
++    temp_dir = tempfile.mkdtemp(prefix="FreeCAD_note_")
++    temp = os.path.join(temp_dir, obj.FileName)
++    try:
++        with open(temp, "w", encoding="utf-8") as stream:
++            stream.write(new_content)
++
++        doc.openTransaction("Edit note")
++        try:
++            obj.Label = label
++            obj.EmbeddedFile = temp
++            obj.Proxy.refreshMetadata(obj)
++        finally:
++            doc.commitTransaction()
++        doc.recompute()
++    finally:
++        shutil.rmtree(temp_dir, ignore_errors=True)
++
++
++class EditNote(_Command):
++    icon = "Documentation_EditNote.svg"
++    menu = QT_TRANSLATE_NOOP("Documentation_EditNote", "Edit note")
++    tip = QT_TRANSLATE_NOOP(
++        "Documentation_EditNote",
++        "Edit the selected HTML/text note in the rich-text editor",
++    )
++
++    def Activated(self):
++        selection = _selected_documents()
++        if selection:
++            edit_note(selection[0])
++
++    def IsActive(self):
++        docs = _selected_documents()
++        return len(docs) == 1 and is_editable_note(docs[0])
++
++
++COMMANDS = {
++    "Documentation_AddDocument": AddDocument,
++    "Documentation_AddNote": AddNote,
++    "Documentation_AddGroup": AddGroup,
++    "Documentation_Open": OpenDocument,
++    "Documentation_EditNote": EditNote,
++    "Documentation_Export": ExportDocument,
++    "Documentation_Replace": ReplaceDocument,
++}
++
++
++def register():
++    for name, cls in COMMANDS.items():
++        FreeCADGui.addCommand(name, cls())
++
++
++# ---------------------------------------------------------------------------
++# Offering to keep an exported PDF with the model
++# ---------------------------------------------------------------------------
++
++_OFFER_PARAM = "User parameter:BaseApp/Preferences/Mod/Documentation"
++
++
++def offerToAttachExport(path, parent=None):
++    """Ask whether a freshly exported PDF should be attached to the model.
++
++    Called after an export finishes.  Users who never want this can turn it
++    off from the dialog itself, which is why the prompt carries a checkbox
++    rather than only Yes/No.
++    """
++    params = FreeCAD.ParamGet(_OFFER_PARAM)
++    if not params.GetBool("OfferToAttachExports", True):
++        return None
++
++    if not path or not os.path.exists(path):
++        return None
++
++    doc = FreeCAD.ActiveDocument
++    if doc is None:
++        return None
++
++    box = QtWidgets.QMessageBox(parent or _main_window())
++    box.setIcon(QtWidgets.QMessageBox.Question)
++    box.setWindowTitle(translate("Documentation", "Keep this export with the model?"))
++    box.setText(
++        translate(
++            "Documentation",
++            "Attach \u201c%s\u201d to the document so it travels with the model?",
++        )
++        % os.path.basename(path)
++    )
++    box.setInformativeText(
++        translate(
++            "Documentation",
++            "The file is embedded in the FCStd and appears under Documentation.",
++        )
++    )
++    box.setStandardButtons(QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
++    box.setDefaultButton(QtWidgets.QMessageBox.Yes)
++
++    remember = QtWidgets.QCheckBox(translate("Documentation", "Do not ask again"))
++    box.setCheckBox(remember)
++
++    answer = box.exec()
++
++    if remember.isChecked():
++        params.SetBool("OfferToAttachExports", False)
++
++    if answer != QtWidgets.QMessageBox.Yes:
++        return None
++
++    group = None
++    for candidate in doc.Objects:
++        proxy = getattr(candidate, "Proxy", None)
++        if proxy is not None and getattr(proxy, "Type", "") == DocObjects.DocumentationGroup.Type:
++            group = candidate
++            break
++
++    # The folder goes into the same transaction, so one Undo removes both.
++    doc.openTransaction("Attach exported document")
++    try:
++        if group is None:
++            group = DocObjects.make_group()
++        obj = DocObjects.make_document(path, embed=True, parent=group)
++        obj.Description = translate("Documentation", "Exported from this model")
++    finally:
++        doc.commitTransaction()
++    doc.recompute()
++    return obj
+diff --git a/src/Mod/Documentation/DocumentationImport.py b/src/Mod/Documentation/DocumentationImport.py
+new file mode 100644
+index 0000000000..7814a8e17c
+--- /dev/null
++++ b/src/Mod/Documentation/DocumentationImport.py
+@@ -0,0 +1,55 @@
++# SPDX-License-Identifier: LGPL-2.1-or-later
++"""File > Import handler for attachable documents.
++
++Attaches the file to the document as a Documentation object.  FreeCAD calls
++insert() for an import and open() for a plain open; both embed the payload
++so the model stays self-contained, matching the toolbar command.
++"""
++
++import FreeCAD
++
++
++def _prepare(docname):
++    if docname:
++        try:
++            FreeCAD.setActiveDocument(docname)
++        except NameError:
++            FreeCAD.newDocument(docname)
++            FreeCAD.setActiveDocument(docname)
++    elif FreeCAD.ActiveDocument is None:
++        FreeCAD.newDocument()
++    return FreeCAD.ActiveDocument
++
++
++def insert(filename, docname=None):
++    """Attach *filename* to the document named *docname* and show it.
++
++    Importing a document is a request to look at it, so the viewer opens
++    straight away rather than leaving the user to find the new tree item
++    and double-click it.
++    """
++    import DocumentationObjects
++
++    doc = _prepare(docname)
++    obj = DocumentationObjects.make_document(filename, embed=True)
++    doc.recompute()
++
++    if FreeCAD.GuiUp:
++        try:
++            from DocumentationViewers import open_document
++
++            open_document(obj)
++        except Exception as exc:  # viewing must not undo a good import
++            FreeCAD.Console.PrintWarning(
++                "Documentation: attached '%s' but could not open it: %s\n"
++                % (obj.Label, exc)
++            )
++
++    return obj
++
++
++def open(filename):
++    """Open *filename* in a new document."""
++    doc = FreeCAD.newDocument()
++    insert(filename, doc.Name)
++    return doc
+diff --git a/src/Mod/Documentation/DocumentationObjects.py b/src/Mod/Documentation/DocumentationObjects.py
+new file mode 100644
+index 0000000000..7704799e13
+--- /dev/null
++++ b/src/Mod/Documentation/DocumentationObjects.py
+@@ -0,0 +1,343 @@
++# SPDX-License-Identifier: LGPL-2.1-or-later
++"""Scripted objects for the Documentation workbench.
++
++Two object types are provided:
++
++``DocumentationGroup``
++    A plain container that groups attached documents in the tree.
++
++``AttachedDocument``
++    A single document.  It can either embed the file inside the .FCStd
++    (via ``App::PropertyFileIncluded``, which stores the payload in the
++    document's zip container) or keep a path to an external file.
++"""
++
++import os
++
++import FreeCAD
++
++translate = FreeCAD.Qt.translate
++QT_TRANSLATE_NOOP = FreeCAD.Qt.QT_TRANSLATE_NOOP
++
++
++# Extensions we can display inside FreeCAD, mapped to a viewer kind.
++VIEWER_PDF = "pdf"
++VIEWER_RICHTEXT = "richtext"
++VIEWER_PLAINTEXT = "plaintext"
++VIEWER_EXTERNAL = "external"
++
++VIEWER_BY_SUFFIX = {
++    "pdf": VIEWER_PDF,
++    "rtf": VIEWER_RICHTEXT,
++    "html": VIEWER_RICHTEXT,
++    "htm": VIEWER_RICHTEXT,
++    "md": VIEWER_PLAINTEXT,
++    "txt": VIEWER_PLAINTEXT,
++    "csv": VIEWER_PLAINTEXT,
++    "log": VIEWER_PLAINTEXT,
++}
++
++
++def viewer_for(filename):
++    """Return the viewer kind able to display *filename*."""
++    suffix = os.path.splitext(filename or "")[1].lstrip(".").lower()
++    return VIEWER_BY_SUFFIX.get(suffix, VIEWER_EXTERNAL)
++
++
++def human_size(num_bytes):
++    """Format a byte count the way a file manager would."""
++    if num_bytes is None:
++        return ""
++    size = float(num_bytes)
++    for unit in ("B", "KB", "MB", "GB"):
++        if size < 1024.0 or unit == "GB":
++            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
++        size /= 1024.0
++    return ""
++
++
++class DocumentationGroup:
++    """Container object; behaves like a folder in the tree."""
++
++    Type = "Documentation::Group"
++
++    def __init__(self, obj):
++        obj.Proxy = self
++        self.Type = self.Type
++        obj.addExtension("App::GroupExtensionPython")
++
++    def dumps(self):
++        return self.Type
++
++    def loads(self, state):
++        self.Type = state if isinstance(state, str) else self.Type
++        return None
++
++    def execute(self, obj):
++        pass
++
++    # Older FreeCAD releases call these instead of dumps/loads.
++    __getstate__ = dumps
++    __setstate__ = loads
++
++
++class AttachedDocument:
++    """A single attached document, embedded or linked."""
++
++    Type = "Documentation::AttachedDocument"
++
++    def __init__(self, obj):
++        obj.Proxy = self
++        self.Type = self.Type
++        self.setProperties(obj)
++
++    def setProperties(self, obj):
++        """Add any property that is not present yet.
++
++        Called both on creation and on restore, so that documents saved
++        by an older version of the workbench gain new properties.
++        """
++        props = obj.PropertiesList
++
++        if "Embedded" not in props:
++            obj.addProperty(
++                "App::PropertyBool",
++                "Embedded",
++                "Storage",
++                QT_TRANSLATE_NOOP(
++                    "App::Property",
++                    "Store the file inside the FCStd container.\n"
++                    "When disabled only the path in ExternalFile is kept.",
++                ),
++            )
++            obj.Embedded = True
++
++        if "EmbeddedFile" not in props:
++            obj.addProperty(
++                "App::PropertyFileIncluded",
++                "EmbeddedFile",
++                "Storage",
++                QT_TRANSLATE_NOOP(
++                    "App::Property", "Payload stored inside the FCStd container"
++                ),
++            )
++
++        if "ExternalFile" not in props:
++            obj.addProperty(
++                "App::PropertyFile",
++                "ExternalFile",
++                "Storage",
++                QT_TRANSLATE_NOOP("App::Property", "Path to the file on disk"),
++            )
++
++        if "FileName" not in props:
++            obj.addProperty(
++                "App::PropertyString",
++                "FileName",
++                "Document",
++                QT_TRANSLATE_NOOP("App::Property", "Original file name"),
++            )
++            obj.setEditorMode("FileName", 1)  # read-only
++
++        if "FileSize" not in props:
++            obj.addProperty(
++                "App::PropertyString",
++                "FileSize",
++                "Document",
++                QT_TRANSLATE_NOOP("App::Property", "Size of the document"),
++            )
++            obj.setEditorMode("FileSize", 1)
++
++        if "Description" not in props:
++            obj.addProperty(
++                "App::PropertyString",
++                "Description",
++                "Document",
++                QT_TRANSLATE_NOOP("App::Property", "What this document contains"),
++            )
++
++        if "Author" not in props:
++            obj.addProperty(
++                "App::PropertyString",
++                "Author",
++                "Revision",
++                QT_TRANSLATE_NOOP("App::Property", "Who produced the document"),
++            )
++
++        if "Revision" not in props:
++            obj.addProperty(
++                "App::PropertyString",
++                "Revision",
++                "Revision",
++                QT_TRANSLATE_NOOP("App::Property", "Revision identifier, e.g. Rev. B"),
++            )
++
++        if "Date" not in props:
++            obj.addProperty(
++                "App::PropertyString",
++                "Date",
++                "Revision",
++                QT_TRANSLATE_NOOP("App::Property", "Date of this revision"),
++            )
++
++        if "Status" not in props:
++            obj.addProperty(
++                "App::PropertyEnumeration",
++                "Status",
++                "Revision",
++                QT_TRANSLATE_NOOP("App::Property", "Approval state"),
++            )
++            obj.Status = ["Draft", "In review", "Approved", "Obsolete"]
++            obj.Status = "Draft"
++
++    def onDocumentRestored(self, obj):
++        self.setProperties(obj)
++
++    def dumps(self):
++        return self.Type
++
++    def loads(self, state):
++        self.Type = state if isinstance(state, str) else self.Type
++        return None
++
++    __getstate__ = dumps
++    __setstate__ = loads
++
++    def execute(self, obj):
++        pass
++
++    def onChanged(self, obj, prop):
++        # Keep the read-only metadata in step with whichever source is active.
++        # During object creation properties are added one by one, so the
++        # others may not exist yet — bail out if the set is incomplete.
++        if prop in ("EmbeddedFile", "ExternalFile", "Embedded"):
++            if "EmbeddedFile" in obj.PropertiesList and "FileName" in obj.PropertiesList:
++                self.refreshMetadata(obj)
++
++    def refreshMetadata(self, obj):
++        path = self.resolvePath(obj)
++        if not path:
++            return
++        try:
++            basename = os.path.basename(path)
++            if obj.FileName != basename:
++                obj.FileName = basename
++            size = human_size(os.path.getsize(path))
++            if obj.FileSize != size:
++                obj.FileSize = size
++        except (OSError, AttributeError):
++            pass
++
++    def resolvePath(self, obj):
++        """Return a readable path for the payload, or an empty string."""
++        if getattr(obj, "Embedded", True):
++            return getattr(obj, "EmbeddedFile", "") or ""
++        external = getattr(obj, "ExternalFile", "") or ""
++        if external and not os.path.isabs(external):
++            # Relative paths resolve against the FCStd location.
++            base = os.path.dirname(obj.Document.FileName or "")
++            if base:
++                external = os.path.join(base, external)
++        return external
++
++
++def _add_child(parent, child):
++    """Add *child* under the best container near *parent*.
++
++    Placement, in order of preference:
++    1. a Documentation group or an App::Part -> addObject directly
++    2. a PartDesign::Body -> its enclosing App::Part, because Body::isAllowed
++       in C++ rejects anything that is not a PartDesign feature
++    3. anything else exposing addObject -> try it
++    4. nothing suitable -> the object stays at document root
++    """
++    if parent is None:
++        return
++
++    parent_type = getattr(parent, "TypeId", "")
++    proxy_type = getattr(getattr(parent, "Proxy", None), "Type", "")
++
++    if proxy_type == DocumentationGroup.Type or parent_type == "App::Part":
++        if _try_add(parent, child):
++            return
++
++    elif parent_type == "PartDesign::Body":
++        for candidate in parent.InList:
++            if getattr(candidate, "TypeId", "") == "App::Part" and _try_add(candidate, child):
++                return
++        FreeCAD.Console.PrintLog(
++            "Documentation: '%s' cannot hold documentation objects and is not "
++            "inside an App::Part, so '%s' was left at document root.\n"
++            % (parent.Label, child.Label)
++        )
++        return
++
++    elif _try_add(parent, child):
++        return
++
++    FreeCAD.Console.PrintWarning(
++        "Documentation: could not place '%s' under '%s'; it stays at document root.\n"
++        % (child.Label, parent.Label)
++    )
++
++
++def _try_add(parent, child):
++    """addObject() that reports why it failed instead of staying silent."""
++    if not hasattr(parent, "addObject"):
++        return False
++    try:
++        parent.addObject(child)
++        return True
++    except Exception as exc:  # the container decides what it accepts
++        FreeCAD.Console.PrintLog(
++            "Documentation: '%s' refused '%s': %s\n" % (parent.Label, child.Label, exc)
++        )
++        return False
++
++
++def make_group(label=None, parent=None):
++    """Create a documentation container in the active document."""
++    doc = FreeCAD.ActiveDocument
++    if doc is None:
++        doc = FreeCAD.newDocument()
++    obj = doc.addObject("App::FeaturePython", "Documentation")
++    DocumentationGroup(obj)
++    obj.Label = label or translate("Documentation", "Documentation")
++    if FreeCAD.GuiUp:
++        from ViewProviders import ViewProviderDocumentationGroup, hideDisplayProperties
++
++        ViewProviderDocumentationGroup(obj.ViewObject)
++        hideDisplayProperties(obj.ViewObject)
++    _add_child(parent, obj)
++    return obj
++
++
++def make_document(path, embed=True, parent=None, label=None):
++    """Attach *path* to the active document.
++
++    With *embed* the payload is copied into the FCStd container, so the
++    file travels with the model.  Otherwise only the path is stored.
++    """
++    doc = FreeCAD.ActiveDocument
++    if doc is None:
++        doc = FreeCAD.newDocument()
++
++    obj = doc.addObject("App::FeaturePython", "Document")
++    AttachedDocument(obj)
++
++    obj.Embedded = bool(embed)
++    if embed:
++        obj.EmbeddedFile = path
++    else:
++        obj.ExternalFile = path
++
++    obj.Label = label or os.path.basename(path)
++    obj.Proxy.refreshMetadata(obj)
++
++    if FreeCAD.GuiUp:
++        from ViewProviders import ViewProviderAttachedDocument, hideDisplayProperties
++
++        ViewProviderAttachedDocument(obj.ViewObject)
++        hideDisplayProperties(obj.ViewObject)
++    _add_child(parent, obj)
++    return obj
+diff --git a/src/Mod/Documentation/DocumentationRaster.py b/src/Mod/Documentation/DocumentationRaster.py
+new file mode 100644
+index 0000000000..0e3d7d8d86
+--- /dev/null
++++ b/src/Mod/Documentation/DocumentationRaster.py
+@@ -0,0 +1,318 @@
++# SPDX-License-Identifier: LGPL-2.1-or-later
++"""Rasterising PDF pages into Image::ImagePlane objects.
++
++This is the "Image formats" side of importing a PDF: instead of opening a
++viewer, each chosen page is rendered to a PNG and placed in the document as
++an ImagePlane, so it can be used as a drawing underlay.
++"""
++
++import os
++import tempfile
++
++import FreeCAD
++import FreeCADGui
++from PySide import QtCore, QtGui, QtWidgets
++
++translate = FreeCAD.Qt.translate
++
++DEFAULT_DPI = 300
++PARAM_PATH = "User parameter:BaseApp/Preferences/Mod/Documentation"
++
++
++def _params():
++    return FreeCAD.ParamGet(PARAM_PATH)
++
++
++def defaultDpi():
++    """Rasterisation resolution, from preferences."""
++    return _params().GetInt("RasterDpi", DEFAULT_DPI)
++
++
++def setDefaultDpi(dpi):
++    _params().SetInt("RasterDpi", int(dpi))
++
++
++def defaultOpaqueBackground():
++    """Whether rasterised pages get a white background instead of alpha."""
++    return _params().GetBool("OpaqueBackground", True)
++
++
++def setDefaultOpaqueBackground(value):
++    _params().SetBool("OpaqueBackground", bool(value))
++
++
++def pageCount(path):
++    """Number of pages in *path*, or 0 when it cannot be read."""
++    reader = QtGui.QImageReader(path)
++    count = reader.imageCount()
++    return count if count > 0 else (1 if reader.canRead() else 0)
++
++
++def renderPage(path, page, dpi):
++    """Render one page of a PDF to a QImage, alpha intact.
++
++    The background is deliberately left transparent: flattening here would
++    bake the choice into the PNG, and ImagePlane's OpaqueBackground toggle
++    could never undo it.
++
++    QImageReader drives the Qt PDF image plugin, which reports the page in
++    points; scaling the requested size gives the resolution asked for.
++    """
++    reader = QtGui.QImageReader(path)
++    reader.setAutoTransform(True)
++    if page > 0:
++        reader.jumpToImage(page)
++
++    natural = reader.size()
++    if natural.isValid() and natural.width() > 0:
++        # The plugin reports pages at 72 dpi; ask for the size we actually want.
++        scale = float(dpi) / 72.0
++        wanted = QtCore.QSize(round(natural.width() * scale), round(natural.height() * scale))
++
++        # ImagePlane refuses images above Qt's allocation limit, and the
++        # reader would fail on them too, so say why instead of returning an
++        # empty plane.
++        limit_mib = QtGui.QImageReader.allocationLimit()
++        needed_mib = wanted.width() * wanted.height() * 4 / (1024 * 1024)
++        if limit_mib > 0 and needed_mib > limit_mib:
++            FreeCAD.Console.PrintWarning(
++                "Documentation: page %d at %d dpi needs about %d MiB, above the %d MiB "
++                "image limit. Choose a lower resolution.\n"
++                % (page + 1, dpi, round(needed_mib), limit_mib)
++            )
++            return QtGui.QImage()
++
++        reader.setScaledSize(wanted)
++
++    image = reader.read()
++    if image.isNull():
++        return image
++
++    dots = round(dpi / 25.4 * 1000.0)
++    image.setDotsPerMeterX(dots)
++    image.setDotsPerMeterY(dots)
++    return image
++
++
++def parsePages(text, total):
++    """Parse "1,3,5-8" into zero-based page indices; empty list on error."""
++    pages = []
++    for part in text.split(","):
++        part = part.strip()
++        if not part:
++            continue
++        if "-" in part:
++            first, _, last = part.partition("-")
++            try:
++                first, last = int(first), int(last)
++            except ValueError:
++                return []
++            if not (1 <= first <= last <= total):
++                return []
++            pages.extend(i - 1 for i in range(first, last + 1) if i - 1 not in pages)
++        else:
++            try:
++                page = int(part)
++            except ValueError:
++                return []
++            if not 1 <= page <= total:
++                return []
++            if page - 1 not in pages:
++                pages.append(page - 1)
++    return sorted(pages)
++
++
++class RasterOptionsDialog(QtWidgets.QDialog):
++    """Ask which pages to rasterise, at what resolution."""
++
++    def __init__(self, filename, total, parent=None):
++        super().__init__(parent)
++        self.setWindowTitle(translate("Documentation", "Import PDF as image"))
++        self.setMinimumWidth(420)
++        self._total = total
++
++        info = QtWidgets.QLabel(
++            translate("Documentation", "\u201c%s\u201d has %s page(s).")
++            % (os.path.basename(filename), total)
++        )
++        info.setWordWrap(True)
++
++        self._pages = QtWidgets.QLineEdit("1")
++        self._pages.setPlaceholderText(translate("Documentation", "e.g. 1,3,5-8 or all"))
++        self._pages.setEnabled(total > 1)
++        if total == 1:
++            self._pages.setText("1")
++
++        self._dpi = QtWidgets.QSpinBox()
++        self._dpi.setRange(30, 600)
++        self._dpi.setSingleStep(50)
++        self._dpi.setSuffix(" dpi")
++        self._dpi.setValue(defaultDpi())
++        self._dpi.setToolTip(
++            translate(
++                "Documentation",
++                "Rasterisation resolution. Higher values give a sharper "
++                "underlay at the cost of memory.",
++            )
++        )
++
++        self._opaque = QtWidgets.QCheckBox(
++            translate("Documentation", "Opaque (white) background")
++        )
++        self._opaque.setChecked(defaultOpaqueBackground())
++        self._opaque.setToolTip(
++            translate(
++                "Documentation",
++                "Uncheck to keep the page background transparent.",
++            )
++        )
++
++        form = QtWidgets.QFormLayout()
++        form.addRow(translate("Documentation", "Pages:"), self._pages)
++        form.addRow(translate("Documentation", "Resolution:"), self._dpi)
++        form.addRow("", self._opaque)
++
++        buttons = QtWidgets.QDialogButtonBox(
++            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
++        )
++        buttons.accepted.connect(self._accept)
++        buttons.rejected.connect(self.reject)
++
++        layout = QtWidgets.QVBoxLayout(self)
++        layout.addWidget(info)
++        layout.addLayout(form)
++        layout.addWidget(buttons)
++
++        self._pages.setFocus()
++        self._pages.selectAll()
++        self._result = []
++
++    def _accept(self):
++        text = self._pages.text().strip()
++        if text.lower() == "all":
++            self._result = list(range(self._total))
++        else:
++            self._result = parsePages(text, self._total)
++
++        if not self._result:
++            QtWidgets.QMessageBox.warning(
++                self,
++                translate("Documentation", "Invalid page selection"),
++                translate(
++                    "Documentation",
++                    "Use page numbers between 1 and %s, commas and dashes.\n"
++                    "Example: 1,3,5-8",
++                )
++                % self._total,
++            )
++            return
++
++        setDefaultDpi(self._dpi.value())
++        setDefaultOpaqueBackground(self._opaque.isChecked())
++        self.accept()
++
++    def pages(self):
++        return self._result
++
++    def dpi(self):
++        return self._dpi.value()
++
++    def opaqueBackground(self):
++        return self._opaque.isChecked()
++
++
++def rasterToImagePlanes(filename, doc=None, pages=None, dpi=None, opaque=None):
++    """Render pages of *filename* into ImagePlane objects.
++
++    With no explicit *pages* and a GUI available, the user is asked. Returns
++    the created objects.
++    """
++    if doc is None:
++        doc = FreeCAD.ActiveDocument or FreeCAD.newDocument()
++
++    total = pageCount(filename)
++    if total < 1:
++        if FreeCAD.GuiUp:
++            QtWidgets.QMessageBox.warning(
++                FreeCADGui.getMainWindow(),
++                translate("Documentation", "Cannot read document"),
++                translate("Documentation", "No pages could be read from %s.") % filename,
++            )
++        return []
++
++    if pages is None:
++        if FreeCAD.GuiUp:
++            dialog = RasterOptionsDialog(filename, total, FreeCADGui.getMainWindow())
++            if dialog.exec() != QtWidgets.QDialog.Accepted:
++                return []
++            pages, dpi, opaque = dialog.pages(), dialog.dpi(), dialog.opaqueBackground()
++        else:
++            pages = [0]
++
++    if dpi is None:
++        dpi = defaultDpi()
++    if opaque is None:
++        opaque = defaultOpaqueBackground()
++
++    base = os.path.splitext(os.path.basename(filename))[0] or "page"
++    outdir = os.path.dirname(os.path.abspath(filename))
++    if not os.access(outdir, os.W_OK):
++        outdir = tempfile.gettempdir()
++
++    created = []
++    doc.openTransaction("Import PDF as image")
++    try:
++        for page in pages:
++            image = renderPage(filename, page, dpi)
++            if image.isNull():
++                FreeCAD.Console.PrintWarning(
++                    "Documentation: page %d of %s could not be rendered.\n"
++                    % (page + 1, filename)
++                )
++                continue
++
++            suffix = "_p%d" % (page + 1) if total > 1 else ""
++            target = _freePath(outdir, base + suffix)
++            if not image.save(target, "PNG"):
++                FreeCAD.Console.PrintWarning(
++                    "Documentation: could not write %s.\n" % target
++                )
++                continue
++
++            obj = doc.addObject("Image::ImagePlane", base + suffix)
++            obj.ImageFile = target
++            obj.Label = base + suffix
++            # Match the pixel size at the requested resolution so the plane
++            # comes out at the page's real dimensions.
++            obj.XSize = image.width() / dpi * 25.4
++            obj.YSize = image.height() / dpi * 25.4
++            _applyTransparency(obj, opaque)
++            created.append(obj)
++    finally:
++        doc.commitTransaction()
++
++    doc.recompute()
++    return created
++
++
++def _freePath(folder, stem):
++    """Return a .png path in *folder* that does not exist yet.
++
++    The images land next to the PDF, where a picture of the same name may
++    well be something the user wants to keep.
++    """
++    target = os.path.join(folder, stem + ".png")
++    counter = 1
++    while os.path.exists(target):
++        counter += 1
++        target = os.path.join(folder, "%s_%d.png" % (stem, counter))
++    return target
++
++
++def _applyTransparency(obj, opaque):
++    """Set the ImagePlane background option when the build provides it."""
++    vobj = getattr(obj, "ViewObject", None)
++    if vobj is None:
++        return
++    if "OpaqueBackground" in vobj.PropertiesList:
++        vobj.OpaqueBackground = bool(opaque)
+diff --git a/src/Mod/Documentation/DocumentationRasterImport.py b/src/Mod/Documentation/DocumentationRasterImport.py
+new file mode 100644
+index 0000000000..0c78fff91a
+--- /dev/null
++++ b/src/Mod/Documentation/DocumentationRasterImport.py
+@@ -0,0 +1,31 @@
++# SPDX-License-Identifier: LGPL-2.1-or-later
++"""File > Import handler that rasterises PDF pages onto ImagePlanes.
++
++The counterpart to DocumentationImport: rather than attaching the document,
++the chosen pages are rendered and placed in the 3D view as underlays.
++"""
++
++import FreeCAD
++
++
++def insert(filename, docname=None):
++    """Rasterise *filename* into the document named *docname*."""
++    import DocumentationRaster
++
++    if docname:
++        try:
++            FreeCAD.setActiveDocument(docname)
++        except NameError:
++            FreeCAD.newDocument(docname)
++            FreeCAD.setActiveDocument(docname)
++    elif FreeCAD.ActiveDocument is None:
++        FreeCAD.newDocument()
++
++    return DocumentationRaster.rasterToImagePlanes(filename, FreeCAD.ActiveDocument)
++
++
++def open(filename):
++    """Rasterise *filename* into a new document."""
++    doc = FreeCAD.newDocument()
++    insert(filename, doc.Name)
++    return doc
+diff --git a/src/Mod/Documentation/DocumentationViewers.py b/src/Mod/Documentation/DocumentationViewers.py
+new file mode 100644
+index 0000000000..f2baa8b534
+--- /dev/null
++++ b/src/Mod/Documentation/DocumentationViewers.py
+@@ -0,0 +1,435 @@
++# SPDX-License-Identifier: LGPL-2.1-or-later
++"""Opening attached documents.
++
++PDFs are handed to FreeCAD's own Gui::PdfView, which gives text selection,
++full-text search, region cropping to an ImagePlane and vector import into
++the document.  Rich text and plain text use a small read-only viewer here,
++since the core has nothing equivalent.  Everything else goes to the desktop.
++"""
++
++import os
++import shutil
++import tempfile
++
++import FreeCAD
++import FreeCADGui
++from PySide import QtCore, QtGui, QtWidgets
++
++from DocumentationObjects import (
++    VIEWER_EXTERNAL,
++    VIEWER_PDF,
++    VIEWER_PLAINTEXT,
++    VIEWER_RICHTEXT,
++    viewer_for,
++)
++
++translate = FreeCAD.Qt.translate
++
++# Viewers opened for an attachment belong to the document that holds it, but
++# FreeCAD only closes views it knows about.  Ours are opened through
++# FreeCADGui.open() and carry no document, so track them and close them when
++# the owning document goes away.
++_openViewers = {}  # (document name, object name) -> file path shown
++_observer = None
++
++# Copies made so an embedded payload can be shown under a proper name. Kept
++# in a folder of our own, one subfolder per attachment, so two attachments
++# called "datasheet.pdf" in different models never share a file.
++_TEMP_ROOT = os.path.join(tempfile.gettempdir(), "FreeCAD_Documentation")
++
++
++def _temp_copy_dir(docname, objname):
++    folder = os.path.join(_TEMP_ROOT, "%s_%s" % (docname or "doc", objname or "obj"))
++    os.makedirs(folder, exist_ok=True)
++    return folder
++
++
++def _is_temp_copy(path):
++    root = os.path.abspath(_TEMP_ROOT)
++    try:
++        return os.path.commonpath([root, os.path.abspath(path)]) == root
++    except ValueError:
++        # Windows: the two paths are on different drives.
++        return False
++
++
++def open_document(obj):
++    """Open *obj* in the most capable viewer available."""
++    path = obj.Proxy.resolvePath(obj)
++
++    if not path or not os.path.exists(path):
++        QtWidgets.QMessageBox.warning(
++            FreeCADGui.getMainWindow(),
++            translate("Documentation", "Document unavailable"),
++            translate(
++                "Documentation",
++                "The file for '%s' could not be found.\n"
++                "For linked documents, check that the path still exists.",
++            )
++            % obj.Label,
++        )
++        return
++
++    name = getattr(obj, "FileName", "") or path
++    kind = viewer_for(name)
++
++    docname = obj.Document.Name if getattr(obj, "Document", None) else None
++    objname = getattr(obj, "Name", None)
++
++    if kind == VIEWER_PDF:
++        _open_pdf(path, name, docname, objname)
++    elif kind in (VIEWER_RICHTEXT, VIEWER_PLAINTEXT):
++        if _activateExisting(path):
++            return
++        viewer = TextViewer(path, obj.Label, original_name=name)
++        viewer.setWindowFilePath(path)
++        _show(viewer)
++        _register(docname, objname, path)
++    else:
++        open_externally(path)
++
++
++def _activateExisting(path):
++    """Raise the window already showing *path*, if there is one.
++
++    Clicking the same attachment twice should return to its window rather
++    than stack up duplicates.
++    """
++    main = FreeCADGui.getMainWindow()
++    mdi = main.findChild(QtWidgets.QMdiArea) if main else None
++    if mdi is None:
++        return False
++
++    wanted = os.path.abspath(path)
++    for sub in mdi.subWindowList():
++        widget = sub.widget()
++        if widget is None:
++            continue
++        shown = widget.windowFilePath()
++        if shown and os.path.abspath(shown) == wanted:
++            if sub.isMinimized():
++                sub.showNormal()
++            mdi.setActiveSubWindow(sub)
++            sub.raise_()
++            return True
++    return False
++
++
++def _register(docname, objname, path):
++    """Remember which window belongs to which attachment."""
++    if not docname or not objname:
++        return
++    _openViewers[(docname, objname)] = path
++    _installObserver()
++
++
++def _installObserver():
++    global _observer
++    if _observer is not None:
++        return
++    _observer = _DocumentCloseObserver()
++    FreeCADGui.addDocumentObserver(_observer)
++
++
++def closeViewersFor(docname, objname=None):
++    """Close the windows opened for a document, or for one attachment of it."""
++    if objname is None:
++        keys = [k for k in _openViewers if k[0] == docname]
++    else:
++        keys = [k for k in _openViewers if k == (docname, objname)]
++
++    paths = [_openViewers.pop(k) for k in keys]
++    if not paths:
++        return
++
++    main = FreeCADGui.getMainWindow()
++    mdi = main.findChild(QtWidgets.QMdiArea) if main else None
++    if mdi is None:
++        return
++
++    wanted = {os.path.abspath(p) for p in paths}
++    for sub in list(mdi.subWindowList()):
++        widget = sub.widget()
++        if widget is None:
++            continue
++        shown = widget.windowFilePath()
++        if shown and os.path.abspath(shown) in wanted:
++            sub.close()
++
++    for path in paths:
++        # Embedded payloads are shown from a temporary copy; clean it up.
++        if _is_temp_copy(path):
++            try:
++                os.remove(path)
++                os.rmdir(os.path.dirname(path))
++            except OSError:
++                pass
++
++
++class _DocumentCloseObserver:
++    """Closes attachment viewers when the document or the object goes away."""
++
++    def slotDeletedObject(self, vobj):
++        # A view provider arrives here, so the object is one step further in.
++        obj = getattr(vobj, "Object", None)
++        doc = getattr(obj, "Document", None)
++        if obj is None or doc is None:
++            return
++        try:
++            closeViewersFor(doc.Name, obj.Name)
++        except Exception as exc:
++            FreeCAD.Console.PrintLog(
++                "Documentation: could not close the viewer for %s: %s\n"
++                % (getattr(obj, "Name", "?"), exc)
++            )
++
++    def slotDeletedDocument(self, doc):
++        # A Gui document is handed over here, and it has no Name of its own -
++        # the name lives on the App document it wraps.
++        name = getattr(getattr(doc, "Document", None), "Name", None)
++        if not name:
++            return
++        try:
++            closeViewersFor(name)
++        except Exception as exc:  # never let an observer break closing
++            FreeCAD.Console.PrintLog(
++                "Documentation: could not close viewers for %s: %s\n" % (name, exc)
++            )
++
++
++def _open_pdf(path, original_name, docname=None, objname=None):
++    """Open a PDF in FreeCAD's native PDF view.
++
++    FreeCADGui.open() routes .pdf to Gui::PdfView.  Embedded payloads are
++    stored by PropertyFileIncluded under a generated name with no suffix,
++    so give the file a .pdf extension first or the routing will not fire.
++    """
++    target = path
++    if os.path.splitext(path)[1].lower() != ".pdf":
++        base = os.path.splitext(os.path.basename(original_name))[0] or "document"
++        target = os.path.join(_temp_copy_dir(docname, objname), base + ".pdf")
++        try:
++            shutil.copyfile(path, target)
++        except OSError:
++            target = path
++
++    if _activateExisting(target):
++        return
++
++    try:
++        FreeCADGui.open(target)
++    except Exception:
++        pass
++    # FreeCADGui.open() only logs when it has no handler for the file, so
++    # look for the window instead of trusting that it did not raise.
++    if _activateExisting(target):
++        _register(docname, objname, target)
++    else:
++        # No Qt PDF support compiled in, or the file could not be opened.
++        open_externally(target)
++
++
++def open_externally(path):
++    """Hand the file to the desktop's default application."""
++    url = QtCore.QUrl.fromLocalFile(os.path.abspath(path))
++    if not QtGui.QDesktopServices.openUrl(url):
++        QtWidgets.QMessageBox.warning(
++            FreeCADGui.getMainWindow(),
++            translate("Documentation", "Cannot open document"),
++            translate(
++                "Documentation", "No application is registered for this file type."
++            ),
++        )
++
++
++def _show(widget):
++    """Dock *widget* into the MDI area."""
++    main = FreeCADGui.getMainWindow()
++    mdi = main.findChild(QtWidgets.QMdiArea)
++    if mdi is None:
++        widget.setParent(main)
++        widget.setWindowFlags(QtCore.Qt.Window)
++        widget.show()
++        return
++    sub = mdi.addSubWindow(widget)
++    sub.setWindowTitle(widget.windowTitle())
++    sub.setStyleSheet("QMdiSubWindow { border: none; }")
++    widget.layout().setContentsMargins(0, 0, 0, 0)
++    sub.showMaximized()
++
++
++class TextViewer(QtWidgets.QWidget):
++    """Read-only viewer for RTF, HTML, Markdown and plain text."""
++
++    def __init__(self, path, title, original_name=""):
++        super().__init__()
++        self.setWindowTitle(title)
++        self.setAttribute(QtCore.Qt.WA_DeleteOnClose)
++
++        data = read_text(path)
++        edit = QtWidgets.QTextEdit(readOnly=True)
++        edit.setFrameShape(QtWidgets.QFrame.NoFrame)
++
++        # PropertyFileIncluded renames files internally, so the stored path
++        # may have lost its suffix; judge the format by the original name.
++        suffix = os.path.splitext(original_name or path)[1].lstrip(".").lower()
++        is_rtf = suffix == "rtf" or data.lstrip().startswith("{\\rtf")
++        is_html = suffix in ("html", "htm")
++
++        if is_rtf:
++            edit.setPlainText(rtf_to_text(data))
++        elif is_html or "<html" in data[:512].lower():
++            edit.setHtml(data)
++        else:
++            edit.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
++            edit.setPlainText(data)
++
++        note = QtWidgets.QLabel()
++        note.setVisible(False)
++        if is_rtf:
++            note.setText(
++                translate(
++                    "Documentation",
++                    "RTF formatting is not rendered here. Use "
++                    '"Open externally" for the fully formatted document.',
++                )
++            )
++            note.setWordWrap(True)
++            note.setVisible(True)
++
++        external = QtWidgets.QPushButton(translate("Documentation", "Open externally"))
++        external.clicked.connect(lambda: open_externally(path))
++
++        bar = QtWidgets.QHBoxLayout()
++        bar.addWidget(note, 1)
++        bar.addWidget(external)
++
++        layout = QtWidgets.QVBoxLayout(self)
++        layout.addWidget(edit)
++        layout.addLayout(bar)
++
++
++def read_text(path):
++    """Read a text file, trying the encodings we are most likely to meet."""
++    for encoding in ("utf-8", "cp1251", "latin-1"):
++        try:
++            with open(path, "r", encoding=encoding) as handle:
++                return handle.read()
++        except UnicodeDecodeError:
++            continue
++        except OSError:
++            return ""
++    return ""
++
++
++def rtf_to_text(data):
++    """Strip RTF markup down to its plain text.
++
++    Small on purpose: it handles the control words, escapes and groups that
++    ordinary documents use, and drops the binary groups that carry no
++    readable text.  Formatting is lost.
++    """
++    skip_groups = (
++        "fonttbl", "colortbl", "stylesheet", "info", "pict",
++        "object", "themedata", "datastore", "latentstyles", "listtable",
++        "generator", "filetbl", "revtbl",
++    )
++
++    out = []
++    depth = 0
++    ignore_until = None
++    index = 0
++    length = len(data)
++    # \ucN: how many fallback characters follow each \uN (1 unless told).
++    # Kept flat rather than per group; documents set it once in the header.
++    fallback_len = 1
++    skip_fallback = 0
++
++    while index < length:
++        char = data[index]
++
++        if char == "{":
++            depth += 1
++            index += 1
++            continue
++
++        if char == "}":
++            if ignore_until is not None and depth <= ignore_until:
++                ignore_until = None
++            depth -= 1
++            index += 1
++            continue
++
++        if char == "\\":
++            if index + 1 < length and data[index + 1] in "\\{}":
++                if skip_fallback:
++                    skip_fallback -= 1
++                elif ignore_until is None:
++                    out.append(data[index + 1])
++                index += 2
++                continue
++
++            if data[index + 1 : index + 2] == "'":
++                hex_digits = data[index + 2 : index + 4]
++                if skip_fallback:
++                    skip_fallback -= 1
++                else:
++                    try:
++                        if ignore_until is None:
++                            out.append(bytes([int(hex_digits, 16)]).decode("cp1251"))
++                    except (ValueError, UnicodeDecodeError):
++                        pass
++                index += 4
++                continue
++
++            cursor = index + 1
++            while cursor < length and data[cursor].isalpha():
++                cursor += 1
++            word = data[index + 1 : cursor]
++
++            param = None
++            if cursor < length and (data[cursor] == "-" or data[cursor].isdigit()):
++                start = cursor
++                cursor += 1
++                while cursor < length and data[cursor].isdigit():
++                    cursor += 1
++                try:
++                    param = int(data[start:cursor])
++                except ValueError:
++                    param = None
++
++            if cursor < length and data[cursor] == " ":
++                cursor += 1
++
++            if word == "uc" and param is not None:
++                fallback_len = max(0, param)
++            elif word == "u" and param is not None:
++                # Word writes everything outside the code page this way,
++                # Cyrillic included, followed by an ANSI stand-in to skip.
++                if ignore_until is None:
++                    out.append(chr(param + 65536 if param < 0 else param))
++                skip_fallback = fallback_len
++                index = cursor
++                continue
++            elif word in skip_groups:
++                ignore_until = depth
++            elif word in ("par", "line", "sect"):
++                if ignore_until is None:
++                    out.append("\n")
++            elif word == "tab":
++                if ignore_until is None:
++                    out.append("\t")
++
++            index = cursor
++            continue
++
++        if skip_fallback and char not in "\r\n":
++            skip_fallback -= 1
++        elif ignore_until is None and char not in "\r\n":
++            out.append(char)
++        index += 1
++
++    text = "".join(out)
++    while "\n\n\n" in text:
++        text = text.replace("\n\n\n", "\n\n")
++    return text.strip()
+diff --git a/src/Mod/Documentation/Init.py b/src/Mod/Documentation/Init.py
+new file mode 100644
+index 0000000000..fbb623f2d2
+--- /dev/null
++++ b/src/Mod/Documentation/Init.py
+@@ -0,0 +1,16 @@
++# SPDX-License-Identifier: LGPL-2.1-or-later
++"""Console-mode initialisation for the Documentation workbench.
++
++Two ways to bring a PDF in, offered side by side in File > Import:
++attaching it as a document, or rasterising pages onto image planes.
++"""
++
++FreeCAD.addImportType(
++    "Attachable document (*.pdf *.rtf *.doc *.docx *.odt *.md *.html *.htm)",
++    "DocumentationImport",
++)
++
++FreeCAD.addImportType(
++    "PDF page as image plane (*.pdf)",
++    "DocumentationRasterImport",
++)
+diff --git a/src/Mod/Documentation/InitGui.py b/src/Mod/Documentation/InitGui.py
+new file mode 100644
+index 0000000000..f8ed742c32
+--- /dev/null
++++ b/src/Mod/Documentation/InitGui.py
+@@ -0,0 +1,54 @@
++# SPDX-License-Identifier: LGPL-2.1-or-later
++"""GUI initialisation for the Documentation workbench."""
++
++import os
++
++import FreeCAD
++import FreeCADGui
++
++
++class DocumentationWorkbench(FreeCADGui.Workbench):
++    """Attach datasheets, drawings and notes to a model."""
++
++    def __init__(self):
++        def QT_TRANSLATE_NOOP(context, text):
++            return text
++
++        __dirname__ = os.path.join(FreeCAD.getResourceDir(), "Mod", "Documentation")
++
++        self.__class__.Icon = os.path.join(
++            __dirname__, "Resources", "icons", "DocumentationWorkbench.svg"
++        )
++        self.__class__.MenuText = QT_TRANSLATE_NOOP("Documentation", "Documentation")
++        self.__class__.ToolTip = QT_TRANSLATE_NOOP(
++            "Documentation",
++            "Attach datasheets, drawings and notes to the model and open them "
++            "inside FreeCAD",
++        )
++
++    _tools = [
++        "Documentation_AddDocument",
++        "Documentation_AddNote",
++        "Documentation_AddGroup",
++        "Separator",
++        "Documentation_Open",
++        "Documentation_EditNote",
++        "Documentation_Export",
++        "Documentation_Replace",
++    ]
++
++    def Initialize(self):
++        def QT_TRANSLATE_NOOP(context, text):
++            return text
++
++        import DocumentationCommands
++
++        DocumentationCommands.register()
++        self.appendToolbar(QT_TRANSLATE_NOOP("Documentation", "Documentation"), self._tools)
++        self.appendMenu(QT_TRANSLATE_NOOP("Documentation", "Documentation"), self._tools)
++
++    def GetClassName(self):
++        return "Gui::PythonWorkbench"
++
++
++FreeCADGui.addWorkbench(DocumentationWorkbench())
+diff --git a/src/Mod/Documentation/Resources/Documentation.qrc b/src/Mod/Documentation/Resources/Documentation.qrc
+new file mode 100644
+index 0000000000..ec39a68248
+--- /dev/null
++++ b/src/Mod/Documentation/Resources/Documentation.qrc
+@@ -0,0 +1,15 @@
++<RCC>
++    <qresource>
++        <file>icons/DocumentationWorkbench.svg</file>
++        <file>icons/Documentation_AddDocument.svg</file>
++        <file>icons/Documentation_AddNote.svg</file>
++        <file>icons/Documentation_EditNote.svg</file>
++        <file>icons/Documentation_Export.svg</file>
++        <file>icons/Documentation_File.svg</file>
++        <file>icons/Documentation_Group.svg</file>
++        <file>icons/Documentation_Open.svg</file>
++        <file>icons/Documentation_Pdf.svg</file>
++        <file>icons/Documentation_Replace.svg</file>
++        <file>icons/Documentation_Text.svg</file>
++    </qresource>
++</RCC>
+diff --git a/src/Mod/Documentation/Resources/icons/DocumentationWorkbench.svg b/src/Mod/Documentation/Resources/icons/DocumentationWorkbench.svg
+new file mode 100644
+index 0000000000..46e8fae166
+--- /dev/null
++++ b/src/Mod/Documentation/Resources/icons/DocumentationWorkbench.svg
+@@ -0,0 +1,8 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
++  <rect x="10" y="8" width="34" height="46" rx="3" fill="#e8eef5" stroke="#3c5a75" stroke-width="2.5"/>
++  <rect x="18" y="14" width="34" height="46" rx="3" fill="#ffffff" stroke="#2d4a63" stroke-width="2.5"/>
++  <path d="M40 14v20l6-5 6 5V14z" fill="#d9534f" stroke="#a33c39" stroke-width="1.5" stroke-linejoin="round"/>
++  <g stroke="#4a6b87" stroke-width="2.5" stroke-linecap="round">
++    <path d="M25 42h20"/><path d="M25 48h20"/><path d="M25 54h13"/>
++  </g>
++</svg>
+diff --git a/src/Mod/Documentation/Resources/icons/Documentation_AddDocument.svg b/src/Mod/Documentation/Resources/icons/Documentation_AddDocument.svg
+new file mode 100644
+index 0000000000..b426553162
+--- /dev/null
++++ b/src/Mod/Documentation/Resources/icons/Documentation_AddDocument.svg
+@@ -0,0 +1,11 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
++  <path d="M12 6h22l11 11v27H12z" fill="#ffffff" stroke="#5a6b7a" stroke-width="2.5" stroke-linejoin="round"/>
++  <path d="M34 6v11h11" fill="#dde4ea" stroke="#5a6b7a" stroke-width="2.5" stroke-linejoin="round"/>
++  <g stroke="#8a9aa8" stroke-width="2.5" stroke-linecap="round">
++    <path d="M18 26h20"/><path d="M18 34h20"/>
++  </g>
++  <circle cx="46" cy="46" r="14" fill="#43a047" stroke="#2e7031" stroke-width="2.5"/>
++  <g stroke="#ffffff" stroke-width="3.5" stroke-linecap="round">
++    <path d="M46 39v14"/><path d="M39 46h14"/>
++  </g>
++</svg>
+diff --git a/src/Mod/Documentation/Resources/icons/Documentation_AddNote.svg b/src/Mod/Documentation/Resources/icons/Documentation_AddNote.svg
+new file mode 100644
+index 0000000000..7285a651cf
+--- /dev/null
++++ b/src/Mod/Documentation/Resources/icons/Documentation_AddNote.svg
+@@ -0,0 +1,9 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
++  <path d="M12 6h22l11 11v25H12z" fill="#fffbe6" stroke="#a8792a" stroke-width="2.5" stroke-linejoin="round"/>
++  <path d="M34 6v11h11" fill="#f6e7bd" stroke="#a8792a" stroke-width="2.5" stroke-linejoin="round"/>
++  <g stroke="#c9a227" stroke-width="2.5" stroke-linecap="round">
++    <path d="M18 26h20"/><path d="M18 34h14"/>
++  </g>
++  <path d="M36 54l-9 3 3-9 17-17 6 6z" fill="#f0c469" stroke="#a8792a" stroke-width="2.5" stroke-linejoin="round"/>
++  <path d="M47 31l6 6" stroke="#a8792a" stroke-width="2.5"/>
++</svg>
+diff --git a/src/Mod/Documentation/Resources/icons/Documentation_EditNote.svg b/src/Mod/Documentation/Resources/icons/Documentation_EditNote.svg
+new file mode 100644
+index 0000000000..efb80598d3
+--- /dev/null
++++ b/src/Mod/Documentation/Resources/icons/Documentation_EditNote.svg
+@@ -0,0 +1,10 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
++  <path d="M10 6h22l10 10v20H10z" fill="#fffbe6" stroke="#a8792a" stroke-width="2.5" stroke-linejoin="round"/>
++  <path d="M32 6v10h10" fill="#f6e7bd" stroke="#a8792a" stroke-width="2.5" stroke-linejoin="round"/>
++  <g stroke="#c9a227" stroke-width="2.5" stroke-linecap="round">
++    <path d="M16 24h18"/><path d="M16 31h12"/>
++  </g>
++  <path d="M30 58l-11 3 3-11 22-22 8 8z" fill="#89b4d4" stroke="#3c5a75" stroke-width="2.5" stroke-linejoin="round"/>
++  <path d="M44 28l8 8" stroke="#3c5a75" stroke-width="2.5"/>
++  <path d="M22 50l8 8" stroke="#3c5a75" stroke-width="2.5"/>
++</svg>
+diff --git a/src/Mod/Documentation/Resources/icons/Documentation_Export.svg b/src/Mod/Documentation/Resources/icons/Documentation_Export.svg
+new file mode 100644
+index 0000000000..0cdcaf5061
+--- /dev/null
++++ b/src/Mod/Documentation/Resources/icons/Documentation_Export.svg
+@@ -0,0 +1,8 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
++  <path d="M12 4h22l11 11v18H12z" fill="#ffffff" stroke="#5a6b7a" stroke-width="2.5" stroke-linejoin="round"/>
++  <path d="M34 4v11h11" fill="#dde4ea" stroke="#5a6b7a" stroke-width="2.5" stroke-linejoin="round"/>
++  <g stroke="#3c5a75" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round">
++    <path d="M32 30v18"/><path d="M24 40l8 8 8-8"/>
++  </g>
++  <path d="M10 52h44v8H10z" fill="#89b4d4" stroke="#3c5a75" stroke-width="2.5" stroke-linejoin="round"/>
++</svg>
+diff --git a/src/Mod/Documentation/Resources/icons/Documentation_File.svg b/src/Mod/Documentation/Resources/icons/Documentation_File.svg
+new file mode 100644
+index 0000000000..c5d62779f7
+--- /dev/null
++++ b/src/Mod/Documentation/Resources/icons/Documentation_File.svg
+@@ -0,0 +1,8 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
++  <path d="M14 6h24l12 12v40a2 2 0 01-2 2H14a2 2 0 01-2-2V8a2 2 0 012-2z"
++        fill="#ffffff" stroke="#5a6b7a" stroke-width="2.5" stroke-linejoin="round"/>
++  <path d="M38 6v12h12" fill="#dde4ea" stroke="#5a6b7a" stroke-width="2.5" stroke-linejoin="round"/>
++  <g stroke="#8a9aa8" stroke-width="2.5" stroke-linecap="round">
++    <path d="M20 30h24"/><path d="M20 38h24"/><path d="M20 46h16"/>
++  </g>
++</svg>
+diff --git a/src/Mod/Documentation/Resources/icons/Documentation_Group.svg b/src/Mod/Documentation/Resources/icons/Documentation_Group.svg
+new file mode 100644
+index 0000000000..93a1e47f99
+--- /dev/null
++++ b/src/Mod/Documentation/Resources/icons/Documentation_Group.svg
+@@ -0,0 +1,5 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
++  <path d="M6 16a3 3 0 013-3h16l5 6h22a3 3 0 013 3v27a3 3 0 01-3 3H9a3 3 0 01-3-3z"
++        fill="#f0c469" stroke="#a8792a" stroke-width="2.5" stroke-linejoin="round"/>
++  <path d="M6 26h52v23a3 3 0 01-3 3H9a3 3 0 01-3-3z" fill="#fadb9a" stroke="#a8792a" stroke-width="2.5"/>
++</svg>
+diff --git a/src/Mod/Documentation/Resources/icons/Documentation_Open.svg b/src/Mod/Documentation/Resources/icons/Documentation_Open.svg
+new file mode 100644
+index 0000000000..96fca76cb2
+--- /dev/null
++++ b/src/Mod/Documentation/Resources/icons/Documentation_Open.svg
+@@ -0,0 +1,8 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
++  <path d="M10 8h22l10 10v20H10z" fill="#ffffff" stroke="#5a6b7a" stroke-width="2.5" stroke-linejoin="round"/>
++  <path d="M32 8v10h10" fill="#dde4ea" stroke="#5a6b7a" stroke-width="2.5" stroke-linejoin="round"/>
++  <path d="M6 44h44l-8 14H14z" fill="#89b4d4" stroke="#3c5a75" stroke-width="2.5" stroke-linejoin="round"/>
++  <g stroke="#2e7031" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round">
++    <path d="M46 26V10"/><path d="M39 17l7-7 7 7"/>
++  </g>
++</svg>
+diff --git a/src/Mod/Documentation/Resources/icons/Documentation_Pdf.svg b/src/Mod/Documentation/Resources/icons/Documentation_Pdf.svg
+new file mode 100644
+index 0000000000..30ed91be02
+--- /dev/null
++++ b/src/Mod/Documentation/Resources/icons/Documentation_Pdf.svg
+@@ -0,0 +1,8 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
++  <path d="M14 6h24l12 12v40a2 2 0 01-2 2H14a2 2 0 01-2-2V8a2 2 0 012-2z"
++        fill="#ffffff" stroke="#5a6b7a" stroke-width="2.5" stroke-linejoin="round"/>
++  <path d="M38 6v12h12" fill="#dde4ea" stroke="#5a6b7a" stroke-width="2.5" stroke-linejoin="round"/>
++  <rect x="8" y="34" width="48" height="20" rx="3" fill="#d9534f"/>
++  <text x="32" y="49" font-family="DejaVu Sans, sans-serif" font-size="14" font-weight="bold"
++        fill="#ffffff" text-anchor="middle">PDF</text>
++</svg>
+diff --git a/src/Mod/Documentation/Resources/icons/Documentation_Replace.svg b/src/Mod/Documentation/Resources/icons/Documentation_Replace.svg
+new file mode 100644
+index 0000000000..4564e6e7f3
+--- /dev/null
++++ b/src/Mod/Documentation/Resources/icons/Documentation_Replace.svg
+@@ -0,0 +1,10 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
++  <path d="M12 6h20l10 10v20H12z" fill="#ffffff" stroke="#5a6b7a" stroke-width="2.5" stroke-linejoin="round"/>
++  <path d="M32 6v10h10" fill="#dde4ea" stroke="#5a6b7a" stroke-width="2.5" stroke-linejoin="round"/>
++  <g fill="none" stroke="#4a86c8" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
++    <path d="M16 46a14 14 0 0122-11"/>
++    <path d="M48 50a14 14 0 01-22 11"/>
++  </g>
++  <path d="M39 29l1 9-9-1z" fill="#4a86c8"/>
++  <path d="M25 67l-1-9 9 1z" fill="#4a86c8"/>
++</svg>
+diff --git a/src/Mod/Documentation/Resources/icons/Documentation_Text.svg b/src/Mod/Documentation/Resources/icons/Documentation_Text.svg
+new file mode 100644
+index 0000000000..8f99f5b63a
+--- /dev/null
++++ b/src/Mod/Documentation/Resources/icons/Documentation_Text.svg
+@@ -0,0 +1,8 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
++  <path d="M14 6h24l12 12v40a2 2 0 01-2 2H14a2 2 0 01-2-2V8a2 2 0 012-2z"
++        fill="#ffffff" stroke="#5a6b7a" stroke-width="2.5" stroke-linejoin="round"/>
++  <path d="M38 6v12h12" fill="#dde4ea" stroke="#5a6b7a" stroke-width="2.5" stroke-linejoin="round"/>
++  <g stroke="#4a86c8" stroke-width="2.5" stroke-linecap="round">
++    <path d="M20 28h24"/><path d="M20 36h24"/><path d="M20 44h24"/><path d="M20 52h14"/>
++  </g>
++</svg>
+diff --git a/src/Mod/Documentation/Resources/translations/Documentation.ts b/src/Mod/Documentation/Resources/translations/Documentation.ts
+new file mode 100644
+index 0000000000..46226206a7
+--- /dev/null
++++ b/src/Mod/Documentation/Resources/translations/Documentation.ts
+@@ -0,0 +1,296 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!DOCTYPE TS>
++<TS version="2.1" sourcelanguage="en">
++  <context>
++    <name>App::Property</name>
++    <message>
++      <location filename="../../DocumentationObjects.py" line="130"/>
++      <source>Path to the file on disk</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationObjects.py" line="138"/>
++      <source>Original file name</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationObjects.py" line="147"/>
++      <source>Size of the document</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationObjects.py" line="156"/>
++      <source>What this document contains</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationObjects.py" line="164"/>
++      <source>Who produced the document</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationObjects.py" line="172"/>
++      <source>Revision identifier, e.g. Rev. B</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationObjects.py" line="180"/>
++      <source>Date of this revision</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationObjects.py" line="188"/>
++      <source>Approval state</source>
++      <translation type="unfinished"></translation>
++    </message>
++  </context>
++  <context>
++    <name>Documentation</name>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="96"/>
++      <source>Select documents to attach</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="135"/>
++      <source>How should this be stored?</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="144"/>
++      <source>Selected: %s file(s), %s</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="148"/>
++      <source>Embed in FCStd</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="151"/>
++      <source>Link to file</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="178"/>
++      <source>Note</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="189"/>
++      <source>Note written in FreeCAD</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="205"/>
++      <source>New note</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="209"/>
++      <source>Title</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="277"/>
++      <source>Size:</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="315"/>
++      <source>Insert link</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="316"/>
++      <source>URL:</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="425"/>
++      <source>Document unavailable</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="426"/>
++      <source>There is no file to save for '%s'.</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="432"/>
++      <source>Save a copy</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="443"/>
++      <source>Could not save</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="452"/>
++      <source>Select the new revision</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="486"/>
++      <source>Edit: %s</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="583"/>
++      <source>Keep this export with the model?</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="600"/>
++      <source>Do not ask again</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="623"/>
++      <source>Exported from this model</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationObjects.py" line="305"/>
++      <source>Documentation</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationRaster.py" line="117"/>
++      <source>Import PDF as image</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationRaster.py" line="122"/>
++      <source>“%s” has %s page(s).</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationRaster.py" line="128"/>
++      <source>e.g. 1,3,5-8 or all</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationRaster.py" line="147"/>
++      <source>Opaque (white) background</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationRaster.py" line="158"/>
++      <source>Pages:</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationRaster.py" line="159"/>
++      <source>Resolution:</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationRaster.py" line="187"/>
++      <source>Invalid page selection</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationRaster.py" line="225"/>
++      <source>Cannot read document</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationRaster.py" line="226"/>
++      <source>No pages could be read from %s.</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationViewers.py" line="212"/>
++      <source>Cannot open document</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationViewers.py" line="274"/>
++      <source>Open externally</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../ViewProviders.py" line="150"/>
++      <source>Open</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../ViewProviders.py" line="157"/>
++      <source>Edit</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../ViewProviders.py" line="160"/>
++      <source>Save a copy...</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../ViewProviders.py" line="163"/>
++      <source>Replace file...</source>
++      <translation type="unfinished"></translation>
++    </message>
++  </context>
++  <context>
++    <name>Documentation_AddDocument</name>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="86"/>
++      <source>Attach document</source>
++      <translation type="unfinished"></translation>
++    </message>
++  </context>
++  <context>
++    <name>Documentation_AddGroup</name>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="328"/>
++      <source>Add folder</source>
++      <translation type="unfinished"></translation>
++    </message>
++  </context>
++  <context>
++    <name>Documentation_AddNote</name>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="167"/>
++      <source>Add note</source>
++      <translation type="unfinished"></translation>
++    </message>
++  </context>
++  <context>
++    <name>Documentation_EditNote</name>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="520"/>
++      <source>Edit note</source>
++      <translation type="unfinished"></translation>
++    </message>
++  </context>
++  <context>
++    <name>Documentation_Export</name>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="362"/>
++      <source>Save a copy</source>
++      <translation type="unfinished"></translation>
++    </message>
++  </context>
++  <context>
++    <name>Documentation_Open</name>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="347"/>
++      <source>Open</source>
++      <translation type="unfinished"></translation>
++    </message>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="348"/>
++      <source>Open the selected document</source>
++      <translation type="unfinished"></translation>
++    </message>
++  </context>
++  <context>
++    <name>Documentation_Replace</name>
++    <message>
++      <location filename="../../DocumentationCommands.py" line="377"/>
++      <source>Replace file</source>
++      <translation type="unfinished"></translation>
++    </message>
++  </context>
++</TS>
+diff --git a/src/Mod/Documentation/Tests/TestDocumentation.py b/src/Mod/Documentation/Tests/TestDocumentation.py
+new file mode 100644
+index 0000000000..3a3336a27d
+--- /dev/null
++++ b/src/Mod/Documentation/Tests/TestDocumentation.py
+@@ -0,0 +1,142 @@
++# SPDX-License-Identifier: LGPL-2.1-or-later
++"""Unit tests for the Documentation workbench.
++
++Only the pure helpers are covered here: format detection, size formatting
++and the RTF unwrapper.  They carry the logic that is easy to get subtly
++wrong and need no GUI or document to exercise.
++"""
++
++import unittest
++
++from DocumentationObjects import (
++    VIEWER_EXTERNAL,
++    VIEWER_PDF,
++    VIEWER_PLAINTEXT,
++    VIEWER_RICHTEXT,
++    human_size,
++    viewer_for,
++)
++from DocumentationRaster import parsePages
++from DocumentationViewers import rtf_to_text
++
++
++class ViewerSelectionCases(unittest.TestCase):
++    def testKnownFormats(self):
++        self.assertEqual(viewer_for("datasheet.pdf"), VIEWER_PDF)
++        self.assertEqual(viewer_for("notes.rtf"), VIEWER_RICHTEXT)
++        self.assertEqual(viewer_for("page.html"), VIEWER_RICHTEXT)
++        self.assertEqual(viewer_for("page.htm"), VIEWER_RICHTEXT)
++        self.assertEqual(viewer_for("readme.md"), VIEWER_PLAINTEXT)
++        self.assertEqual(viewer_for("log.txt"), VIEWER_PLAINTEXT)
++
++    def testExtensionIsCaseInsensitive(self):
++        self.assertEqual(viewer_for("DATASHEET.PDF"), VIEWER_PDF)
++        self.assertEqual(viewer_for("Notes.RtF"), VIEWER_RICHTEXT)
++
++    def testUnhandledFormatsGoToTheDesktop(self):
++        for name in ("spec.docx", "sheet.odt", "archive.zip"):
++            self.assertEqual(viewer_for(name), VIEWER_EXTERNAL)
++
++    def testMissingOrOddNames(self):
++        for name in ("noextension", "", None, ".pdf.bak"):
++            self.assertEqual(viewer_for(name), VIEWER_EXTERNAL)
++
++    def testDotsInDirectoryDoNotConfuseDetection(self):
++        self.assertEqual(viewer_for("/home/a.b/c.pdf"), VIEWER_PDF)
++
++
++class HumanSizeCases(unittest.TestCase):
++    def testUnits(self):
++        self.assertEqual(human_size(0), "0 B")
++        self.assertEqual(human_size(512), "512 B")
++        self.assertEqual(human_size(2048), "2.0 KB")
++        self.assertEqual(human_size(5 * 1024**2), "5.0 MB")
++        self.assertEqual(human_size(3 * 1024**3), "3.0 GB")
++
++    def testUnknownSize(self):
++        self.assertEqual(human_size(None), "")
++
++
++class RtfToTextCases(unittest.TestCase):
++    SAMPLE = (
++        r"{\rtf1\ansi\ansicpg1251\deff0"
++        r"{\fonttbl{\f0\fnil Times New Roman;}}"
++        r"{\colortbl ;\red0\green0\blue0;}"
++        r"{\info{\author Someone}{\title Spec}}"
++        r"\pard\f0\fs24 Technical specification\par"
++        r"Part: \b SN65DSI83\b0\par"
++        r"Supply: 1.8 V \'b1 5\%\par"
++        r"\tab Indented\par"
++        r"Braces \{x\} and \\slash\par"
++        r"}"
++    )
++
++    def testBodyTextSurvives(self):
++        text = rtf_to_text(self.SAMPLE)
++        self.assertIn("Technical specification", text)
++        self.assertIn("SN65DSI83", text)
++
++    def testControlGroupsAreDropped(self):
++        text = rtf_to_text(self.SAMPLE)
++        for unwanted in ("Times New Roman", "red0", "Someone"):
++            self.assertNotIn(unwanted, text)
++
++    def testControlWordsAreNotLeftBehind(self):
++        text = rtf_to_text(self.SAMPLE)
++        for unwanted in (r"\par", r"\fs24", r"\pard"):
++            self.assertNotIn(unwanted, text)
++
++    def testEscapesAreUnwrapped(self):
++        text = rtf_to_text(self.SAMPLE)
++        self.assertIn("{x}", text)
++        self.assertIn("\\slash", text)
++
++    def testHexEscapeDecodesToCp1251(self):
++        # \'b1 is the plus-minus sign in cp1251
++        self.assertIn("\u00b1", rtf_to_text(self.SAMPLE))
++
++    def testUnicodeEscapesSkipTheirFallback(self):
++        # Word stores Cyrillic as \uN followed by a one-character stand-in.
++        rtf = r"{\rtf1 \u1055?\u1088?\u1080?\u1074?\u1110?\u1090?}"
++        self.assertEqual(rtf_to_text(rtf), "\u041f\u0440\u0438\u0432\u0456\u0442")
++
++    def testUnicodeEscapeWithHexFallbackAndUc(self):
++        rtf = r"{\rtf1 \uc2 \u-3913\'3f\'3fx}"
++        self.assertEqual(rtf_to_text(rtf), chr(65536 - 3913) + "x")
++
++    def testParagraphsAndTabs(self):
++        text = rtf_to_text(self.SAMPLE)
++        self.assertIn("\tIndented", text)
++        self.assertIn("\n", text)
++
++    def testEmptyInput(self):
++        self.assertEqual(rtf_to_text(""), "")
++
++
++class PageRangeCases(unittest.TestCase):
++    def testSinglePages(self):
++        self.assertEqual(parsePages("1", 10), [0])
++        self.assertEqual(parsePages("1,3,5", 10), [0, 2, 4])
++
++    def testRanges(self):
++        self.assertEqual(parsePages("2-5", 10), [1, 2, 3, 4])
++        self.assertEqual(parsePages("1,3-5", 10), [0, 2, 3, 4])
++
++    def testResultIsSortedAndDeduplicated(self):
++        self.assertEqual(parsePages("5,1,3,1", 10), [0, 2, 4])
++        self.assertEqual(parsePages("2-4,3-5", 10), [1, 2, 3, 4])
++
++    def testWhitespaceIsTolerated(self):
++        self.assertEqual(parsePages(" 1 , 3 - 4 ", 10), [0, 2, 3])
++
++    def testOutOfRangeIsRejected(self):
++        self.assertEqual(parsePages("0", 10), [])
++        self.assertEqual(parsePages("11", 10), [])
++        self.assertEqual(parsePages("5-20", 10), [])
++
++    def testMalformedInputIsRejected(self):
++        for text in ("abc", "1-", "-3", "1,,x", "3-1"):
++            self.assertEqual(parsePages(text, 10), [], text)
++
++    def testEmptyInput(self):
++        self.assertEqual(parsePages("", 10), [])
+diff --git a/src/Mod/Documentation/Tests/__init__.py b/src/Mod/Documentation/Tests/__init__.py
+new file mode 100644
+index 0000000000..bd4fba4dfe
+--- /dev/null
++++ b/src/Mod/Documentation/Tests/__init__.py
+@@ -0,0 +1 @@
++# SPDX-License-Identifier: LGPL-2.1-or-later
+diff --git a/src/Mod/Documentation/ViewProviders.py b/src/Mod/Documentation/ViewProviders.py
+new file mode 100644
+index 0000000000..bbea85cfa8
+--- /dev/null
++++ b/src/Mod/Documentation/ViewProviders.py
+@@ -0,0 +1,183 @@
++# SPDX-License-Identifier: LGPL-2.1-or-later
++"""View providers for the Documentation workbench."""
++
++import os
++
++import FreeCAD
++
++translate = FreeCAD.Qt.translate
++
++from DocumentationObjects import (
++    VIEWER_EXTERNAL,
++    VIEWER_PDF,
++    VIEWER_PLAINTEXT,
++    VIEWER_RICHTEXT,
++    viewer_for,
++)
++
++
++
++def _find_icon_dir():
++    """Locate the icons directory.
++
++    They are installed under the resource directory rather than next to this
++    file, because InitGui resolves the workbench icon through
++    getResourceDir() and both should read from the same place.
++    """
++    return os.path.join(
++        FreeCAD.getResourceDir(), "Mod", "Documentation", "Resources", "icons"
++    )
++
++
++ICON_DIR = _find_icon_dir()
++
++ICON_BY_VIEWER = {
++    VIEWER_PDF: "Documentation_Pdf.svg",
++    VIEWER_RICHTEXT: "Documentation_Text.svg",
++    VIEWER_PLAINTEXT: "Documentation_Text.svg",
++    VIEWER_EXTERNAL: "Documentation_File.svg",
++}
++
++
++def icon_path(name):
++    return os.path.join(ICON_DIR, name)
++
++
++# These only mean something for an object drawn in the 3D view. An attachment
++# opens in its own window, so hide the controls instead of showing ones that
++# do nothing.
++_UNUSED_DISPLAY_PROPERTIES = (
++    "Visibility",
++    "DisplayMode",
++    "ShowInTree",
++    "OnTopWhenSelected",
++    "SelectionStyle",
++)
++
++
++def hideDisplayProperties(vobj):
++    """Strip the 3D display controls from an object that is never rendered.
++
++    Removes the eye toggle from the tree, hides the properties behind it and
++    forces Visibility on, since that flag is what greys out a tree label.
++    """
++    # Same mechanism VarSet and Spreadsheet use: these objects are not drawn,
++    # so the tree should not offer a visibility toggle for them.
++    try:
++        vobj.ToggleVisibility = "NoToggleVisibility"
++    except (AttributeError, ValueError):
++        pass  # older FreeCAD without the property
++
++    for name in _UNUSED_DISPLAY_PROPERTIES:
++        if name in vobj.PropertiesList:
++            try:
++                vobj.setEditorMode(name, 2)  # hidden
++            except Exception:
++                pass
++
++    # Visibility drives the greyed-out look in the tree, so force it on.
++    if "Visibility" in vobj.PropertiesList and not vobj.Visibility:
++        vobj.Visibility = True
++
++
++class _BaseViewProvider:
++    """Shared plumbing so both view providers survive save/restore."""
++
++    def attach(self, vobj):
++        self.ViewObject = vobj
++        self.Object = vobj.Object
++        hideDisplayProperties(vobj)
++
++    def onDocumentRestored(self, vobj):
++        hideDisplayProperties(vobj)
++
++    def dumps(self):
++        return None
++
++    def loads(self, state):
++        return None
++
++    __getstate__ = dumps
++    __setstate__ = loads
++
++
++class ViewProviderDocumentationGroup(_BaseViewProvider):
++    def __init__(self, vobj):
++        vobj.Proxy = self
++        vobj.addExtension("Gui::ViewProviderGroupExtensionPython")
++        hideDisplayProperties(vobj)
++
++    def isShow(self):
++        return True
++
++    def getIcon(self):
++        return icon_path("Documentation_Group.svg")
++
++
++class ViewProviderAttachedDocument(_BaseViewProvider):
++    def __init__(self, vobj):
++        vobj.Proxy = self
++        hideDisplayProperties(vobj)
++
++    def isShow(self):
++        # These objects have nothing to draw, but the tree greys out anything
++        # reporting itself as hidden, which made every attachment look
++        # disabled.  Claim visibility so the label renders normally.
++        return True
++
++    def canDragObjects(self):
++        return False
++
++    def canDropObjects(self):
++        return False
++
++    def getIcon(self):
++        obj = getattr(self, "Object", None)
++        name = obj.FileName if obj is not None else ""
++        return icon_path(ICON_BY_VIEWER[viewer_for(name)])
++
++    def doubleClicked(self, vobj):
++        from DocumentationViewers import open_document
++
++        open_document(vobj.Object)
++        return True
++
++    def setupContextMenu(self, vobj, menu):
++        from PySide import QtGui
++
++        obj = vobj.Object
++
++        action = menu.addAction(translate("Documentation", "Open"))
++        action.triggered.connect(lambda: self.doubleClicked(vobj))
++
++        # Edit only what the note editor can save back unchanged.
++        from DocumentationCommands import is_editable_note
++
++        if is_editable_note(obj):
++            action = menu.addAction(translate("Documentation", "Edit"))
++            action.triggered.connect(lambda: self._edit(obj))
++
++        action = menu.addAction(translate("Documentation", "Save a copy..."))
++        action.triggered.connect(lambda: self._export(obj))
++
++        action = menu.addAction(translate("Documentation", "Replace file..."))
++        action.triggered.connect(lambda: self._replace(obj))
++
++        return True
++
++    def _export(self, obj):
++        from DocumentationCommands import export_document
++
++        export_document(obj)
++
++    def _replace(self, obj):
++        from DocumentationCommands import replace_document
++
++        replace_document(obj)
++
++    def _edit(self, obj):
++        from DocumentationCommands import edit_note
++        edit_note(obj)
++
++    def claimChildren(self):
++        return []
+diff --git a/src/Mod/TechDraw/Gui/PagePrinter.cpp b/src/Mod/TechDraw/Gui/PagePrinter.cpp
+index f8d730a5af..c4a95b9bf5 100644
+--- a/src/Mod/TechDraw/Gui/PagePrinter.cpp
++++ b/src/Mod/TechDraw/Gui/PagePrinter.cpp
+@@ -42,6 +42,7 @@
+ #include <Base/Stream.h>
+ #include <Base/Tools.h>
+ #include <Gui/Application.h>
++#include <Gui/MDIView.h>
+ #include <Gui/Command.h>
+ #include <Gui/Document.h>
+ #include <Gui/ViewProvider.h>
+@@ -430,6 +431,11 @@ void PagePrinter::printPdf(ViewProviderPage* vpPage, const std::string& file)
+ 
+     postRenderCleanUp(ourScene, dPage, ourTemplate);
+     ourDoc->setModified(docModifiedState);
++
++    // QPdfWriter only finishes the file when the painter is done,
++    // so close it before offering the result.
++    painter.end();
++    Gui::MDIView::offerToAttachExport(outputFile);
+ }
+ 
+ void PagePrinter::preRenderSetUp(TechDrawGui::ViewProviderPage* vpp,
