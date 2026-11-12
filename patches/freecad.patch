@@ -5225,7 +5225,7 @@ index a0e22108..3365e999 100644
 +            # equivalent, so a report log shows which mesher actually ran.
 +            Console.PrintMessage("  gmsh (wasm): " + self.model_file + "\n")
 +            try:
-+                rc = _w.run(self.model_file, self.model_filemetry, self.temp_file_mesh, 4)
++                rc = _w.run(self.model_file, self.temp_file_geometry, self.temp_file_mesh, 4)
 +            except Exception as e:
 +                self.error = True
 +                err = f"Meshing failed: {e}\n"
