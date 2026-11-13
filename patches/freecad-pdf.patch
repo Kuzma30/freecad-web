@@ -2342,10 +2342,10 @@ index 0000000000..f88c7e6ae0
 +)
 diff --git a/src/Mod/Documentation/DocumentationCommands.py b/src/Mod/Documentation/DocumentationCommands.py
 new file mode 100644
-index 0000000000..f004286feb
+index 0000000000..00f3a26cad
 --- /dev/null
 +++ b/src/Mod/Documentation/DocumentationCommands.py
-@@ -0,0 +1,665 @@
+@@ -0,0 +1,750 @@
 +# SPDX-License-Identifier: LGPL-2.1-or-later
 +"""Commands for the Documentation workbench."""
 +
@@ -2371,6 +2371,51 @@ index 0000000000..f004286feb
 +    "Text (*.rtf *.txt *.md *.html);;"
 +    "All files (*)"
 +)
++
++
++# Qt for WebAssembly hands out "weblocalfile:/<n>/<name>" for a file picked in the browser.
++# Only Qt's file engine can open that path; FreeCAD's file properties and Python's os/shutil
++# see nothing there ("File weblocalfile:/1/x.pdf does not exist"). These bridge the two.
++_WEB_SCHEME = "weblocalfile:"
++
++
++def _is_web_path(path):
++    return str(path).startswith(_WEB_SCHEME)
++
++
++def _local_copy(path):
++    """Return a path Python and FreeCAD can read: *path* itself, or for a browser file a
++    temporary copy under its own name (embedding copies it into the FCStd anyway)."""
++    if not _is_web_path(path):
++        return path
++    src = QtCore.QFile(path)
++    if not src.open(QtCore.QIODevice.ReadOnly):
++        raise OSError("Cannot read %s: %s" % (path, src.errorString()))
++    try:
++        data = bytes(src.readAll())
++    finally:
++        src.close()
++    name = os.path.basename(path.rstrip("/")) or "document"
++    target = os.path.join(tempfile.mkdtemp(prefix="fcdoc-"), name)
++    with open(target, "wb") as fh:
++        fh.write(data)
++    return target
++
++
++def _save_copy(source, target):
++    """shutil.copyfile that can also write to a browser save target."""
++    if not _is_web_path(target):
++        shutil.copyfile(source, target)
++        return
++    with open(source, "rb") as fh:
++        data = fh.read()
++    out = QtCore.QFile(target)
++    if not out.open(QtCore.QIODevice.WriteOnly):
++        raise OSError("Cannot write %s: %s" % (target, out.errorString()))
++    try:
++        out.write(QtCore.QByteArray(data))
++    finally:
++        out.close()
 +
 +
 +def _main_window():
@@ -2449,8 +2494,28 @@ index 0000000000..f004286feb
 +        if not paths:
 +            return
 +
-+        embed = self._askEmbed(paths)
-+        if embed is None:
++        if any(_is_web_path(p) for p in paths):
++            # A file from the browser has no path that outlives this session, so a link
++            # would point at nothing after a reload: embed it, without asking.
++            embed = True
++        else:
++            embed = self._askEmbed(paths)
++            if embed is None:
++                return
++        temps = []
++        try:
++            local = []
++            for p in paths:
++                local.append(_local_copy(p))
++                if local[-1] != p:
++                    temps.append(os.path.dirname(local[-1]))
++            paths = local
++        except OSError as exc:
++            for d in temps:
++                shutil.rmtree(d, ignore_errors=True)
++            QtWidgets.QMessageBox.critical(
++                _main_window(), translate("Documentation", "Could not read the file"), str(exc)
++            )
 +            return
 +
 +        doc = _ensure_document()
@@ -2463,6 +2528,9 @@ index 0000000000..f004286feb
 +                created.append(DocObjects.make_document(path, embed=embed, parent=parent))
 +        finally:
 +            doc.commitTransaction()
++            # Embedding copied each file into the document; the browser copies are spent.
++            for d in temps:
++                shutil.rmtree(d, ignore_errors=True)
 +        doc.recompute()
 +
 +        # Attaching a single document usually means the user wants to see it.
@@ -2799,7 +2867,7 @@ index 0000000000..f004286feb
 +        return
 +
 +    try:
-+        shutil.copyfile(source, target)
++        _save_copy(source, target)
 +    except OSError as exc:
 +        QtWidgets.QMessageBox.critical(
 +            _main_window(),
@@ -2817,6 +2885,23 @@ index 0000000000..f004286feb
 +        FILE_FILTER,
 +    )
 +    if not path:
++        return
++    if _is_web_path(path) and not obj.Embedded:
++        QtWidgets.QMessageBox.warning(
++            _main_window(),
++            translate("Documentation", "Cannot link"),
++            translate(
++                "Documentation",
++                "A file opened from the browser can only be embedded, not linked.",
++            ),
++        )
++        return
++    try:
++        path = _local_copy(path)
++    except OSError as exc:
++        QtWidgets.QMessageBox.critical(
++            _main_window(), translate("Documentation", "Could not read the file"), str(exc)
++        )
 +        return
 +
 +    doc = obj.Document
