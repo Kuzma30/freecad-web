@@ -147,6 +147,16 @@ echo "qt bundled zlib: $QTZLIB"
 QTPDFLIBS=""
 if [ -f "$ROOT/qt/6.11.2/wasm_mt_weh/lib/libQt6PdfWidgets.a" ]; then
     QTPDFLIBS="$ROOT/qt/6.11.2/wasm_mt_weh/lib/libQt6PdfWidgets.a $ROOT/qt/6.11.2/wasm_mt_weh/lib/libQt6Pdf.a"
+    # The PDF image-format plugin: QImageReader reads PDF pages through it, which is how the
+    # Documentation workbench rasterises pages into ImagePlanes (DocumentationRaster.py).
+    # Static, so both the archive and its Q_IMPORT_PLUGIN init object must be on the line;
+    # the plugin itself links against libQt6Pdf.a, hence before it.
+    QPDFPLUGIN="$ROOT/qt/6.11.2/wasm_mt_weh/plugins/imageformats/libqpdf.a"
+    QPDFINIT="$ROOT/qt/6.11.2/wasm_mt_weh/plugins/imageformats/objects-Release/QPdfPlugin_init/QPdfPlugin_init.cpp.o"
+    if [ -f "$QPDFPLUGIN" ] && [ -f "$QPDFINIT" ]; then
+        QTPDFLIBS="$QPDFINIT $QPDFPLUGIN $QTPDFLIBS"
+        echo "qt pdf image plugin: $QPDFPLUGIN"
+    fi
     echo "qt pdf: $QTPDFLIBS"
 fi
 

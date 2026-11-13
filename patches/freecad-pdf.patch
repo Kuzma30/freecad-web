@@ -248,10 +248,10 @@ index ea9d471db0..6cc05fbcf2 100644
      /** Save the printer configuration */
 diff --git a/src/Gui/PdfView.cpp b/src/Gui/PdfView.cpp
 new file mode 100644
-index 0000000000..69eb46a36f
+index 0000000000..dc0abb7b54
 --- /dev/null
 +++ b/src/Gui/PdfView.cpp
-@@ -0,0 +1,1454 @@
+@@ -0,0 +1,1474 @@
 +// SPDX-License-Identifier: LGPL-2.1-or-later
 +
 +/***************************************************************************
@@ -289,6 +289,7 @@ index 0000000000..69eb46a36f
 +#include <QLineEdit>
 +#include <QMessageBox>
 +#include <QMouseEvent>
++#include <QWheelEvent>
 +#include <QPagedPaintDevice>
 +#include <QPainter>
 +#include <QPrinter>
@@ -657,6 +658,21 @@ index 0000000000..69eb46a36f
 +    QPdfView::mouseReleaseEvent(event);
 +}
 +
++void PdfSelectionView::wheelEvent(QWheelEvent* event)
++{
++    if (!(event->modifiers() & Qt::ControlModifier)) {
++        QPdfView::wheelEvent(event);
++        return;
++    }
++    // One notch (120) is one zoom step; trackpads send smaller deltas and so
++    // zoom smoothly instead of in jumps.
++    const int delta = event->angleDelta().y();
++    if (delta != 0) {
++        Q_EMIT zoomRequested(std::pow(ZoomStep, delta / 120.0), event->position());
++    }
++    event->accept();
++}
++
 +void PdfSelectionView::paintEvent(QPaintEvent* event)
 +{
 +    QPdfView::paintEvent(event);
@@ -876,6 +892,7 @@ index 0000000000..69eb46a36f
 +    retranslateUi();
 +
 +    connect(zoomInButton, &QToolButton::clicked, this, &PdfView::onZoomIn);
++    connect(pdfView, &PdfSelectionView::zoomRequested, this, &PdfView::applyZoom);
 +    connect(zoomOutButton, &QToolButton::clicked, this, &PdfView::onZoomOut);
 +    connect(zoomFitButton, &QToolButton::clicked, this, &PdfView::onZoomReset);
 +    connect(prevPageButton, &QToolButton::clicked, this, &PdfView::onPrevPage);
@@ -1428,6 +1445,9 @@ index 0000000000..69eb46a36f
 +    Gui::cmdAppDocumentArgs(appDoc,
 +                            "ActiveObject.ViewObject.OpaqueBackground = %s",
 +                            background.clickedButton() == keepAlpha ? "False" : "True");
++    // A drawing underlay is meant to read as on paper: "Shading" multiplies the
++    // texture by the scene lighting, which turns the white page grey.
++    Gui::cmdAppDocumentArgs(appDoc, "ActiveObject.ViewObject.DisplayMode = '%s'", "No shading");
 +    appDoc->commitTransaction();
 +    Gui::cmdAppDocument(appDoc, "recompute()");
 +}
@@ -1552,7 +1572,7 @@ index 0000000000..69eb46a36f
 +    }
 +}
 +
-+void PdfView::applyZoom(qreal factor)
++void PdfView::applyZoom(qreal factor, const QPointF& anchor)
 +{
 +    // currentPage is derived from the scroll position, so the way to keep the
 +    // page stable across a zoom is to move the scrollbars by the same ratio
@@ -1572,9 +1592,9 @@ index 0000000000..69eb46a36f
 +    pdfView->setZoomFactor(newZoom);
 +
 +    const qreal ratio = newZoom / oldZoom;
-+    QTimer::singleShot(0, this, [this, oldV, oldH, ratio] {
-+        pdfView->verticalScrollBar()->setValue(qRound(oldV * ratio));
-+        pdfView->horizontalScrollBar()->setValue(qRound(oldH * ratio));
++    QTimer::singleShot(0, this, [this, oldV, oldH, ratio, anchor] {
++        pdfView->verticalScrollBar()->setValue(qRound((oldV + anchor.y()) * ratio - anchor.y()));
++        pdfView->horizontalScrollBar()->setValue(qRound((oldH + anchor.x()) * ratio - anchor.x()));
 +        updatePageLabel();
 +    });
 +}
@@ -1708,10 +1728,10 @@ index 0000000000..69eb46a36f
 +#endif  // HAVE_QT_PDF_WIDGETS
 diff --git a/src/Gui/PdfView.h b/src/Gui/PdfView.h
 new file mode 100644
-index 0000000000..97fecdc372
+index 0000000000..8aedcbeaea
 --- /dev/null
 +++ b/src/Gui/PdfView.h
-@@ -0,0 +1,278 @@
+@@ -0,0 +1,283 @@
 +// SPDX-License-Identifier: LGPL-2.1-or-later
 +
 +/***************************************************************************
@@ -1823,12 +1843,16 @@ index 0000000000..97fecdc372
 +Q_SIGNALS:
 +    void selectionChanged(const QString& text);
 +    void regionChanged(bool hasRegion);
++    /// Ctrl + wheel: zoom by *factor*, keeping the point *anchor* (viewport
++    /// coordinates) over the same spot of the page.
++    void zoomRequested(qreal factor, const QPointF& anchor);
 +
 +protected:
 +    void mousePressEvent(QMouseEvent* event) override;
 +    void mouseMoveEvent(QMouseEvent* event) override;
 +    void mouseReleaseEvent(QMouseEvent* event) override;
 +    void paintEvent(QPaintEvent* event) override;
++    void wheelEvent(QWheelEvent* event) override;
 +
 +private:
 +    /// Pixels per point of *page* as currently rendered; 0 when unknown.
@@ -1941,8 +1965,9 @@ index 0000000000..97fecdc372
 +    void updateBookmarkPanel();
 +
 +private:
-+    /// Change zoom while keeping the same content under the viewport.
-+    void applyZoom(qreal factor);
++    /// Change zoom while keeping the same content under the viewport point
++    /// *anchor* (the top-left corner by default).
++    void applyZoom(qreal factor, const QPointF& anchor = QPointF());
 +    /// Switch to a zoom mode, preserving the scroll fraction.
 +    void applyZoomMode(QPdfView::ZoomMode mode);
 +
@@ -3508,10 +3533,10 @@ index 0000000000..7704799e13
 +    return obj
 diff --git a/src/Mod/Documentation/DocumentationRaster.py b/src/Mod/Documentation/DocumentationRaster.py
 new file mode 100644
-index 0000000000..0e3d7d8d86
+index 0000000000..c759dcf220
 --- /dev/null
 +++ b/src/Mod/Documentation/DocumentationRaster.py
-@@ -0,0 +1,318 @@
+@@ -0,0 +1,322 @@
 +# SPDX-License-Identifier: LGPL-2.1-or-later
 +"""Rasterising PDF pages into Image::ImagePlane objects.
 +
@@ -3830,6 +3855,10 @@ index 0000000000..0e3d7d8d86
 +        return
 +    if "OpaqueBackground" in vobj.PropertiesList:
 +        vobj.OpaqueBackground = bool(opaque)
++    # "Shading" multiplies the page by the scene lighting and turns its white
++    # grey; an underlay should read as on paper.
++    if "No shading" in vobj.getEnumerationsOfProperty("DisplayMode"):
++        vobj.DisplayMode = "No shading"
 diff --git a/src/Mod/Documentation/DocumentationRasterImport.py b/src/Mod/Documentation/DocumentationRasterImport.py
 new file mode 100644
 index 0000000000..0c78fff91a
