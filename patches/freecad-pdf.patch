@@ -248,10 +248,10 @@ index ea9d471db0..6cc05fbcf2 100644
      /** Save the printer configuration */
 diff --git a/src/Gui/PdfView.cpp b/src/Gui/PdfView.cpp
 new file mode 100644
-index 0000000000..dc0abb7b54
+index 0000000000..35e6eba01e
 --- /dev/null
 +++ b/src/Gui/PdfView.cpp
-@@ -0,0 +1,1474 @@
+@@ -0,0 +1,1521 @@
 +// SPDX-License-Identifier: LGPL-2.1-or-later
 +
 +/***************************************************************************
@@ -279,10 +279,14 @@ index 0000000000..dc0abb7b54
 +
 +#include <QAction>
 +#include <QApplication>
++#include <QCheckBox>
 +#include <QClipboard>
++#include <QDialog>
++#include <QDialogButtonBox>
 +#include <QDir>
 +#include <QFileDialog>
 +#include <QFileInfo>
++#include <QFormLayout>
 +#include <QGuiApplication>
 +#include <QHBoxLayout>
 +#include <QLabel>
@@ -297,6 +301,7 @@ index 0000000000..dc0abb7b54
 +#include <QPushButton>
 +#include <QScreen>
 +#include <QScrollBar>
++#include <QSpinBox>
 +#include <QStandardPaths>
 +#include <QTemporaryDir>
 +#include <QTimer>
@@ -338,6 +343,15 @@ index 0000000000..dc0abb7b54
 +constexpr qreal ZoomStep = 1.25;
 +constexpr qreal ZoomMin = 0.1;
 +constexpr qreal ZoomMax = 10.0;
++
++// Inserting a region renders the whole page and crops it (see
++// onInsertRegionAsImagePlane), so the page, not the crop, sets the memory cost.
++constexpr int RegionDpiMin = 30;
++constexpr int RegionDpiMax = 1200;
++constexpr int RegionDpiDefault = 300;
++constexpr qreal RegionRenderMaxMiB = 512.0;
++// Shared with File > Import's rasteriser (Mod/Documentation/DocumentationRaster.py).
++constexpr const char* RasterParamPath = "User parameter:BaseApp/Preferences/Mod/Documentation";
 +// Resolution range used when pages are rasterised for printing.
 +constexpr int MinPrintDpi = 200;
 +constexpr int MaxPrintDpi = 300;
@@ -1322,14 +1336,65 @@ index 0000000000..dc0abb7b54
 +        return;
 +    }
 +
++    // Ask for the resolution and the background together. The defaults are the
++    // ones File > Import uses, and the choice is remembered for next time.
++    ParameterGrp::handle params = App::GetApplication().GetParameterGroupByPath(RasterParamPath);
++    const QSizeF pagePoints = pdfDocument->pagePointSize(page);
++
++    QDialog options(this);
++    options.setWindowTitle(tr("Insert region as image plane"));
++    auto dpiBox = new QSpinBox(&options);
++    dpiBox->setRange(RegionDpiMin, RegionDpiMax);
++    dpiBox->setSingleStep(50);
++    dpiBox->setSuffix(tr(" dpi"));
++    dpiBox->setValue(int(params->GetInt("RasterDpi", RegionDpiDefault)));
++    dpiBox->setToolTip(tr("Resolution of the image. Higher values give a sharper\n"
++                          "underlay at the cost of memory and file size."));
++    // Pages come back with premultiplied alpha over a transparent background,
++    // which turns black if the alpha is simply dropped. White is the safe
++    // default, but a transparent crop is handy as an overlay.
++    auto opaqueBox = new QCheckBox(tr("Opaque (white) background"), &options);
++    opaqueBox->setChecked(params->GetBool("OpaqueBackground", true));
++    opaqueBox->setToolTip(tr("Uncheck to keep the page background transparent, so the\n"
++                             "underlay blends with what is behind it."));
++    auto sizeLabel = new QLabel(&options);
++    auto buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &options);
++    connect(buttons, &QDialogButtonBox::accepted, &options, &QDialog::accept);
++    connect(buttons, &QDialogButtonBox::rejected, &options, &QDialog::reject);
++
++    auto updateSize = [&]() {
++        const qreal s = dpiBox->value() / 72.0;
++        const QSize crop = (region.size() * s).toSize();
++        const QSize full = (pagePoints * s).toSize();
++        const qreal mib = qreal(full.width()) * full.height() * 4.0 / (1024.0 * 1024.0);
++        const bool fits = mib <= RegionRenderMaxMiB;
++        sizeLabel->setText(fits ? tr("Image: %1 \u00d7 %2 px").arg(crop.width()).arg(crop.height())
++                                : tr("Too large: rendering the page would need %1 MB.\n"
++                                     "Choose a lower resolution.").arg(qRound(mib)));
++        buttons->button(QDialogButtonBox::Ok)->setEnabled(fits);
++    };
++    connect(dpiBox, qOverload<int>(&QSpinBox::valueChanged), &options, updateSize);
++    updateSize();
++
++    auto form = new QFormLayout(&options);
++    form->addRow(tr("Resolution:"), dpiBox);
++    form->addRow(QString(), opaqueBox);
++    form->addRow(QString(), sizeLabel);
++    form->addRow(buttons);
++
++    if (options.exec() != QDialog::Accepted) {
++        return;
++    }
++    const qreal dpi = dpiBox->value();
++    const bool opaqueBackground = opaqueBox->isChecked();
++    params->SetInt("RasterDpi", int(dpi));
++    params->SetBool("OpaqueBackground", opaqueBackground);
++
 +    // Render the full page and cut the piece out ourselves.
 +    // setScaledClipRect() looks like the right tool but returns a rectangle
 +    // that drifts further off the further it is from the page origin, which
-+    // left crops offset and stretched. An A4 page at 300 DPI costs about
-+    // 35 MB, fine for a one-off.
-+    const qreal dpi = 300.0;
++    // left crops offset and stretched.
 +    const qreal scale = dpi / 72.0;
-+    const QSizeF pagePoints = pdfDocument->pagePointSize(page);
 +    const QSize pagePixels = (pagePoints * scale).toSize();
 +
 +    const QImage pageImage = pdfDocument->render(page, pagePixels);
@@ -1358,25 +1423,7 @@ index 0000000000..dc0abb7b54
 +        return;
 +    }
 +
-+    // Pages come back with premultiplied alpha over a transparent
-+    // background, which turns black if the alpha is simply dropped. White is
-+    // the safe default, but a transparent crop is handy as an overlay.
-+    QMessageBox background(this);
-+    background.setIcon(QMessageBox::Question);
-+    background.setWindowTitle(tr("Background"));
-+    background.setText(tr("Keep the page background transparent?"));
-+    background.setInformativeText(
-+        tr("A transparent background lets the underlay blend with what is\n"
-+           "behind it. An opaque one renders the crop on white, which is\n"
-+           "what a printed page looks like."));
-+    QAbstractButton* keepAlpha =
-+        background.addButton(tr("Transparent"), QMessageBox::AcceptRole);
-+    QAbstractButton* onWhite =
-+        background.addButton(tr("Opaque (white)"), QMessageBox::RejectRole);
-+    background.setDefaultButton(qobject_cast<QPushButton*>(onWhite));
-+    background.exec();
-+
-+    if (background.clickedButton() != keepAlpha && image.hasAlphaChannel()) {
++    if (opaqueBackground && image.hasAlphaChannel()) {
 +        QImage opaque(image.size(), QImage::Format_RGB32);
 +        opaque.fill(Qt::white);
 +        QPainter painter(&opaque);
@@ -1444,7 +1491,7 @@ index 0000000000..dc0abb7b54
 +    Gui::cmdAppDocumentArgs(appDoc, "ActiveObject.Label = '%s'", base);
 +    Gui::cmdAppDocumentArgs(appDoc,
 +                            "ActiveObject.ViewObject.OpaqueBackground = %s",
-+                            background.clickedButton() == keepAlpha ? "False" : "True");
++                            opaqueBackground ? "True" : "False");
 +    // A drawing underlay is meant to read as on paper: "Shading" multiplies the
 +    // texture by the scene lighting, which turns the white page grey.
 +    Gui::cmdAppDocumentArgs(appDoc, "ActiveObject.ViewObject.DisplayMode = '%s'", "No shading");
@@ -2367,10 +2414,10 @@ index 0000000000..f88c7e6ae0
 +)
 diff --git a/src/Mod/Documentation/DocumentationCommands.py b/src/Mod/Documentation/DocumentationCommands.py
 new file mode 100644
-index 0000000000..00f3a26cad
+index 0000000000..c0781d051a
 --- /dev/null
 +++ b/src/Mod/Documentation/DocumentationCommands.py
-@@ -0,0 +1,750 @@
+@@ -0,0 +1,786 @@
 +# SPDX-License-Identifier: LGPL-2.1-or-later
 +"""Commands for the Documentation workbench."""
 +
@@ -2602,6 +2649,41 @@ index 0000000000..00f3a26cad
 +        if clicked is link_btn:
 +            return False
 +        return None
++
++
++class ImportPdfImages(_Command):
++    icon = "Documentation_Pdf.svg"
++    menu = QT_TRANSLATE_NOOP("Documentation_ImportPdfImages", "Import PDF pages as images")
++    tip = QT_TRANSLATE_NOOP(
++        "Documentation_ImportPdfImages",
++        "Render pages of a PDF onto image planes, to use as underlays.\n"
++        "Choose the pages, the resolution and the background.",
++    )
++
++    def Activated(self):
++        # The same as File > Import with "PDF page as image plane", reachable where the
++        # file picker cannot say which importer was meant -- the browser's own picker in
++        # the web build shows no FreeCAD filters, and a .pdf then goes to the attacher.
++        path, _ = QtWidgets.QFileDialog.getOpenFileName(
++            _main_window(),
++            translate("Documentation", "Select a PDF to import as images"),
++            "",
++            "PDF (*.pdf)",
++        )
++        if not path:
++            return
++        try:
++            path = _local_copy(path)
++        except OSError as exc:
++            QtWidgets.QMessageBox.critical(
++                _main_window(), translate("Documentation", "Could not read the file"), str(exc)
++            )
++            return
++
++        import DocumentationRaster
++
++        if DocumentationRaster.rasterToImagePlanes(path, _ensure_document()):
++            FreeCADGui.SendMsgToActiveView("ViewFit")
 +
 +
 +class AddNote(_Command):
@@ -3035,6 +3117,7 @@ index 0000000000..00f3a26cad
 +COMMANDS = {
 +    "Documentation_AddDocument": AddDocument,
 +    "Documentation_AddNote": AddNote,
++    "Documentation_ImportPdfImages": ImportPdfImages,
 +    "Documentation_AddGroup": AddGroup,
 +    "Documentation_Open": OpenDocument,
 +    "Documentation_EditNote": EditNote,
@@ -4361,10 +4444,10 @@ index 0000000000..fbb623f2d2
 +)
 diff --git a/src/Mod/Documentation/InitGui.py b/src/Mod/Documentation/InitGui.py
 new file mode 100644
-index 0000000000..f8ed742c32
+index 0000000000..9f573bfef7
 --- /dev/null
 +++ b/src/Mod/Documentation/InitGui.py
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,55 @@
 +# SPDX-License-Identifier: LGPL-2.1-or-later
 +"""GUI initialisation for the Documentation workbench."""
 +
@@ -4396,6 +4479,7 @@ index 0000000000..f8ed742c32
 +    _tools = [
 +        "Documentation_AddDocument",
 +        "Documentation_AddNote",
++        "Documentation_ImportPdfImages",
 +        "Documentation_AddGroup",
 +        "Separator",
 +        "Documentation_Open",
